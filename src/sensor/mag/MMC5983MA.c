@@ -25,6 +25,7 @@ static int64_t oneshot_trigger_ms = 0;
 static bool oneshot_pending;
 static bool oneshot_failed;
 static bool auto_set_reset = true;
+static bool rail_saturated = false; // 饱和去抖：只在进入/退出饱和沿打日志
 
 LOG_MODULE_REGISTER(MMC5983MA, LOG_LEVEL_DBG);
 
@@ -92,9 +93,11 @@ int mmc_update_odr(float period_s, float *actual_period_s)
 		odr_code = MODR_200Hz;
 		bandwidth_code = MBW_800Hz; // Existing BW=11 choice; Rev. A lists BW=01 for 200 Hz.
 		period_s = 1.0 / 200;
-	} else if (requested_odr_hz > 50) { // 100Hz*2ms/1000ms = 20% active
+	} else if (requested_odr_hz > 50) { // 100Hz*4ms/1000ms = 40% active
 		odr_code = MODR_100Hz;
-		bandwidth_code = MBW_400Hz; // 0.8mG
+		// BW=01（4ms，0.6mG）：开 Auto_SR 时每样本 SET+RESET 两次测量 4ms×2=8ms
+		// < 10ms 周期，裕量够且噪声较 BW=10（2ms，0.8mG）再降 25%。
+		bandwidth_code = MBW_200Hz;
 		period_s = 1.0 / 100;
 	} else if (requested_odr_hz > 20) { // 50Hz*4ms/1000ms = 20% active
 		odr_code = MODR_50Hz;
@@ -210,6 +213,23 @@ bool mmc_mag_read(float m[3])
 		LOG_ERR("Communication error");
 		return false;
 	}
+	// 软件饱和 rail 检测：芯片无 OVFL 状态位，18-bit 无符号输出顶到 0 或
+	// 262143 即判饱和拒收——防止磁铁贴近时的满量程样本污染硬/软磁校准拟合
+	// 与 VQF 磁场基准（干扰场 >10G 后须靠 SET/RESET 恢复，属硬件机制）。
+	uint32_t rawMag[3];
+	rawMag[0] = (uint32_t)(rawData[0] << 10 | rawData[1] << 2 | (rawData[6] & 0xC0) >> 6);
+	rawMag[1] = (uint32_t)(rawData[2] << 10 | rawData[3] << 2 | (rawData[6] & 0x30) >> 4);
+	rawMag[2] = (uint32_t)(rawData[4] << 10 | rawData[5] << 2 | (rawData[6] & 0x0C) >> 2);
+	for (int i = 0; i < 3; i++) {
+		if (rawMag[i] <= 1 || rawMag[i] >= 262142) {
+			if (!rail_saturated) {
+				LOG_INF("Magnetometer saturated (rail), sample rejected");
+			}
+			rail_saturated = true;
+			return false;
+		}
+	}
+	rail_saturated = false;
 	mmc_mag_process(rawData, m);
 	return true;
 }
@@ -303,7 +323,9 @@ static int mmc_SET(void)
 		LOG_ERR("Communication error");
 		return err;
 	}
-	k_busy_wait(1); // Rev. A, Internal Control 0: SET self-clears after the 500 ns pulse.
+	// Rev. A 写 SET/RESET 线圈脉冲 500ns 自清；但 Linux IIO 实测（2026-05 补丁）
+	// 复位后需保守等 ~500µs 再发起下一次测量，1µs 不够。ArduPilot 用 1ms。
+	k_busy_wait(500);
 	return 0;
 }
 
@@ -314,7 +336,7 @@ static int mmc_RESET(void)
 		LOG_ERR("Communication error");
 		return err;
 	}
-	k_busy_wait(1); // Rev. A, Internal Control 0: RESET self-clears after the 500 ns pulse.
+	k_busy_wait(500); // 同上：datasheet 500ns，实测按 500µs 保守等待
 	return 0;
 }
 
