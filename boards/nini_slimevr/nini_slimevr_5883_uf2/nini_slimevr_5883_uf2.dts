@@ -1,0 +1,274 @@
+// Copyright (c) 2024 Nordic Semiconductor ASA
+// SPDX-License-Identifier: Apache-2.0
+
+// 板级设备树：nini_slimevr_5883_uf2 ——【追踪器 tracker】（nRF52833 QDAA）
+// 由我们注入的 nini 板级文件（上游 jitingcn 仓不含）。
+// 与旧板 nini_slimevr_mag_uf2 的硬件差异：
+//   ① 三颗 LED 改为【共阴】接法（高电平点亮），新增红灯：
+//      红 P0.10 / 绿 P0.20 / 蓝 P0.09，全部 GPIO_ACTIVE_HIGH、PWM_POLARITY_NORMAL，
+//      不再用 GPIO_OPEN_DRAIN 与 nordic,invert；
+//   ② P0.18 接 nRF 的 nRESET（UICR gpio-as-nreset），不再是普通 GPIO/按键；
+//   ③ 板载 32.768kHz 晶振（LFXO 走应用 Kconfig CLOCK_USE_LFXO，默认开，无需 dts 配置）；
+//   ④ 磁力计为 QMC5883P（I2C 0x2C，驱动另行注入），dts 侧仍为通用 i2c-device 占位。
+// 其余引脚（SW0/INT/CHG/STDBY/PWR/SPI3/I2C0/IMUCLK）与旧板一致。
+
+/dts-v1/;
+#include <nordic/nrf52833_qdaa.dtsi>
+#include <zephyr/dt-bindings/gpio/gpio.h>
+#include <zephyr/dt-bindings/gpio/nordic-nrf-gpio.h>
+#include <zephyr/dt-bindings/pinctrl/nrf-pinctrl.h>
+
+
+&pinctrl {
+	spi3_default: spi3_default {
+		group1 {
+			psels = <NRF_PSEL(SPIM_MISO, 0, 28)>,
+					<NRF_PSEL(SPIM_MOSI, 0, 29)>,
+					<NRF_PSEL(SPIM_SCK, 0, 30)>;
+		};
+	};
+
+	spi3_sleep: spi3_sleep {
+		group1 {
+			psels = <NRF_PSEL(SPIM_MISO, 0, 28)>,
+					<NRF_PSEL(SPIM_MOSI, 0, 29)>,
+					<NRF_PSEL(SPIM_SCK, 0, 30)>;
+			low-power-enable;
+		};
+	};
+
+	i2c0_default: i2c0_default {
+		group1 {
+			psels = <NRF_PSEL(TWIM_SDA, 0, 17)>,
+					<NRF_PSEL(TWIM_SCL, 0, 15)>;
+			bias-disable;
+		};
+	};
+
+	i2c0_sleep: i2c0_sleep {
+		group1 {
+			psels = <NRF_PSEL(TWIM_SDA, 0, 17)>,
+					<NRF_PSEL(TWIM_SCL, 0, 15)>;
+			bias-disable;
+			low-power-enable;
+		};
+	};
+
+	/* IMUCLK：P0.02 输出 32768Hz（pwmclock 节点，PWM0 ch0）。默认关闭，
+	 * 由固件 pwmclock 门控按需开启（详见计划书 §7.4）。 */
+	pwm0_default: pwm0_default {
+		group1 {
+			psels = <NRF_PSEL(PWM_OUT0, 0, 2)>;
+			nordic,drive-mode = <NRF_DRIVE_D0S1>;
+		};
+	};
+
+	pwm0_sleep: pwm0_sleep {
+		group1 {
+			psels = <NRF_PIN_DISCONNECTED>;
+			low-power-enable;
+		};
+	};
+
+	/* 三色 LED（共阴，高电平点亮）：蓝 P0.09(ch0) / 绿 P0.20(ch1) / 红 P0.10(ch2)。
+	 * 共阴接法：输出高电平点亮 → 不用 nordic,invert；点亮电平用高驱动 S0H1。 */
+	pwm1_default: pwm1_default {
+		group1 {
+			psels = <NRF_PSEL(PWM_OUT0, 0, 9)>,
+					<NRF_PSEL(PWM_OUT1, 0, 20)>,
+					<NRF_PSEL(PWM_OUT2, 0, 10)>;
+			nordic,drive-mode = <NRF_DRIVE_S0H1>;
+		};
+	};
+
+	pwm1_sleep: pwm1_sleep {
+		group1 {
+			psels = <NRF_PSEL(PWM_OUT0, 0, 9)>,
+					<NRF_PSEL(PWM_OUT1, 0, 20)>,
+					<NRF_PSEL(PWM_OUT2, 0, 10)>;
+			low-power-enable;
+		};
+	};
+};
+
+
+/ {
+	model = "nini_slimevr_5883_uf2";
+	compatible = "nini_slimevr_5883_uf2";
+
+	chosen {
+		zephyr,sram = &sram0;
+		zephyr,flash = &flash0;
+		zephyr,console = &cdc_acm_uart0;
+		zephyr,shell-uart = &cdc_acm_uart0;
+	};
+
+	pwmleds {
+		compatible = "pwm-leds";
+		/* 色序对齐 led.c 三色约定：pwm-led0=红 / pwm-led1=绿 / pwm-led2=蓝。
+		 * 共阴高电平点亮 → PWM_POLARITY_NORMAL（旧板为 INVERTED）。 */
+		pwm_led0: pwm_led_0 {
+			pwms = <&pwm1 2 PWM_MSEC(1) PWM_POLARITY_NORMAL>;
+		};
+		pwm_led1: pwm_led_1 {
+			pwms = <&pwm1 1 PWM_MSEC(1) PWM_POLARITY_NORMAL>;
+		};
+		pwm_led2: pwm_led_2 {
+			pwms = <&pwm1 0 PWM_MSEC(1) PWM_POLARITY_NORMAL>;
+		};
+	};
+
+	leds {
+		compatible = "gpio-leds";
+		/* 色序：led0=红 P0.10 / led1=绿 P0.20 / led2=蓝 P0.09（led.h 三色约定）。
+		 * 共阴接法：GPIO_ACTIVE_HIGH、不用 GPIO_OPEN_DRAIN（旧板共阳为
+		 * ACTIVE_LOW|OPEN_DRAIN）。 */
+		led0: led_0 {
+			gpios = <&gpio0 10 GPIO_ACTIVE_HIGH>;
+		};
+		led1: led_1 {
+			gpios = <&gpio0 20 GPIO_ACTIVE_HIGH>;
+		};
+		led2: led_2 {
+			gpios = <&gpio0 9 GPIO_ACTIVE_HIGH>;
+		};
+	};
+
+	buttons {
+		compatible = "gpio-keys";
+		button0: button_0 {
+			gpios = <&gpio0 4 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			label = "Push button switch 0";
+		};
+	};
+
+	aliases {
+		sw0 = &button0;
+		led0 = &led0;
+		led1 = &led1;
+		led2 = &led2;
+		pwm-led0 = &pwm_led0;
+		pwm-led1 = &pwm_led1;
+		pwm-led2 = &pwm_led2;
+		watchdog0 = &wdt;
+	};
+
+	pwmclock: pwmclock {
+		compatible = "pwm-clock";
+		#clock-cells = <1>;
+		pwms = <&pwm0 0 PWM_HZ(32768) PWM_POLARITY_NORMAL>;
+	};
+
+	battery-divider {
+		compatible = "voltage-divider";
+		status = "okay";
+		io-channels = <&adc 12>; /* Measure VDDHDIV5 */
+		output-ohms = <1>;
+		full-ohms = <5>;
+	};
+
+	zephyr,user {
+		int0-gpios = <&gpio0 3 0>;
+		chg-gpios = <&gpio0 11 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+		stby-gpios = <&gpio0 5 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+		/* LDO-EN：P1.09，高电平开（关机由 power.c 拉低断电）。
+		 * ⚠️ 只允许写 pwr-gpios——绝不能写成 ldo-gpios（那是 nRF 稳压器档位，
+		 * sys_system_off 会把它拉高，方向正好相反）。 */
+		pwr-gpios = <&gpio1 9 (GPIO_ACTIVE_HIGH | NRF_GPIO_DRIVE_H0H1)>;
+		led0-gpios = <&gpio0 10 GPIO_ACTIVE_HIGH>;
+		led1-gpios = <&gpio0 20 GPIO_ACTIVE_HIGH>;
+		led2-gpios = <&gpio0 9 GPIO_ACTIVE_HIGH>;
+		/* clk-gpios = <&gpio0 2 GPIO_OPEN_DRAIN>; */
+	};
+};
+
+&reg1 {
+	regulator-initial-mode = <NRF5X_REG_MODE_DCDC>;
+};
+
+&adc {
+	status = "okay";
+};
+
+&gpiote {
+	status = "okay";
+};
+
+&gpio0 {
+    status = "okay";
+};
+
+&gpio1 {
+    status = "okay";
+};
+
+zephyr_udc0: &usbd {
+	compatible = "nordic,nrf-usbd";
+	status = "okay";
+	cdc_acm_uart0: cdc_acm_uart0 {
+		compatible = "zephyr,cdc-acm-uart";
+	};
+};
+
+&nfct {
+	status = "disabled";
+};
+
+&uicr {
+	nfct-pins-as-gpios;
+	/* P0.18 接 nRESET（板上硬件复位键/测试点），让出 GPIO 功能。
+	 * DFU 双击进 bootloader 用 SW0（P0.04），见固件侧配置。 */
+	gpio-as-nreset;
+};
+
+&wdt {
+	status = "okay";
+};
+
+&pwm0 {
+	status = "okay";
+	pinctrl-0 = <&pwm0_default>;
+	pinctrl-1 = <&pwm0_sleep>;
+	pinctrl-names = "default", "sleep";
+};
+
+&pwm1 {
+	status = "okay";
+	pinctrl-0 = <&pwm1_default>;
+	pinctrl-1 = <&pwm1_sleep>;
+	pinctrl-names = "default", "sleep";
+};
+
+&spi3 {
+	status = "okay";
+	compatible = "nordic,nrf-spim";
+	pinctrl-0 = <&spi3_default>;
+	pinctrl-1 = <&spi3_sleep>;
+	pinctrl-names = "default", "sleep";
+	max-frequency = <DT_FREQ_M(24)>;
+	cs-gpios = <&gpio0 31 GPIO_ACTIVE_LOW>;
+
+	imu_spi: imu_spi@0 {
+		compatible = "vnd,spi-device";
+		spi-max-frequency = <DT_FREQ_M(24)>;
+		label = "imu-spi";
+		reg = <0>;
+	};
+};
+
+&i2c0 {
+	compatible = "nordic,nrf-twim";
+	status = "okay";
+	zephyr,concat-buf-size = <1023>;
+	zephyr,flash-buf-max-size = <1023>;
+	clock-frequency = <I2C_BITRATE_FAST>;
+	pinctrl-0 = <&i2c0_default>;
+	pinctrl-1 = <&i2c0_sleep>;
+	pinctrl-names = "default", "sleep";
+
+	mag: mag@0 {
+		compatible = "i2c-device";
+		label = "mag";
+		reg = <0>;
+	};
+};

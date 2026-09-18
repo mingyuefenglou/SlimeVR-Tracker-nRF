@@ -1,0 +1,10 @@
+# Copyright (c) 2024 Nordic Semiconductor ASA
+# SPDX-License-Identifier: Apache-2.0
+
+config BOARD_NINI_SLIMEVR_5883_UF2
+	bool "NiNi SlimeVR 5883 UF2 board"
+	select SOC_NRF52833_QDAA
+	select BOARD_HAS_DTS
+	help
+	  Enable support for the NiNi SlimeVR 5883 UF2 board with tri-color
+	  common-cathode PWM LED, QMC5883P magnetometer and I2C/SPI sensor buses.
