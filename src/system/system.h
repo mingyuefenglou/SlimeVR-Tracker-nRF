@@ -66,6 +66,21 @@ void sys_nvs_stats(void);
 
 int set_sensor_clock(bool enable, float rate, float* actual_rate);
 
+// IMUCLK（pwmclock，32.768kHz）手动/自动门控（nini 注入，通用可上游）。
+// 两部分机制：①手动 pwmclock on/off 覆盖自动逻辑（重启回 auto）；
+// ②自动——探测到「需外部时钟」的 IMU（42688/42686/45686）才开启，
+// 并由各驱动自带的 CLKIN 探活（10ms FIFO 计数）验证时钟真正生效。
+enum sensor_clock_user_mode {
+	SENSOR_CLOCK_AUTO = 0,
+	SENSOR_CLOCK_FORCE_ON,
+	SENSOR_CLOCK_FORCE_OFF,
+};
+int sys_sensor_clock_apply(bool auto_want, float *actual_rate);
+void sys_sensor_clock_set_user_mode(enum sensor_clock_user_mode mode);
+enum sensor_clock_user_mode sys_sensor_clock_get_user_mode(void);
+bool sys_sensor_clock_is_applied(void);
+float sys_sensor_clock_last_rate(void);
+
 bool button_read(void);
 bool button_read_filtered(void);
 

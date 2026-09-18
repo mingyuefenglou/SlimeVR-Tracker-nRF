@@ -1259,6 +1259,7 @@ static void print_help(void)
 	printk("\n");
 	printk("Sensor Management:\n");
 	printk("  scan                       Restart sensor scan\n");
+	printk("  pwmclock [on|off|auto]      IMU 32.768kHz clock gate (status if no arg)\n");
 	printk("  calibrate                  Calibrate sensor ZRO\n");
 #if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
 	printk("  6-side                     Calibrate 6-side accelerometer\n");
@@ -1531,6 +1532,45 @@ static void console_cmd_scan(size_t argc, char **argv)
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 	sensor_request_scan(true);
+}
+
+// IMUCLK（pwmclock，32.768kHz）控制：on=强制开 / off=强制关 / auto=恢复按探测
+// 自动（42688/42686/45686 开，40608/LSM6 不开）；无参=显示当前状态。
+// 切换后建议执行 scan 重初始化（驱动需以 clock_rate=32768 重跑 init 才切 CLKIN
+// 模式）；CLKIN 是否真正生效看启动日志里驱动的探活结果（失败自动回退内部时钟）。
+static void console_cmd_pwmclock(size_t argc, char **argv)
+{
+	char *arg = argc > 1 ? argv[1] : NULL;
+
+	if (arg == NULL || strcmp(arg, "status") == 0) {
+		static const char *mode_names[] = {"auto", "force-on", "force-off"};
+		enum sensor_clock_user_mode mode = sys_sensor_clock_get_user_mode();
+		printk("pwmclock: mode=%s enabled=%d rate=%.0fHz\n",
+		       mode_names[mode],
+		       sys_sensor_clock_is_applied(),
+		       (double)sys_sensor_clock_last_rate());
+		printk("  (auto 规则：探测到 ICM-42688/42686/45686 开启；其余不开。\n");
+		printk("   时钟生效验证见启动日志 CLKIN 探活，或示波器测 P0.02。)\n");
+	} else if (strcmp(arg, "on") == 0) {
+		sys_sensor_clock_set_user_mode(SENSOR_CLOCK_FORCE_ON);
+		float rate = 0;
+		int err = sys_sensor_clock_apply(true, &rate);
+		if (err) {
+			printk("pwmclock: force-on FAILED (err=%d) — 检查 dts pwmclock 节点/P0.02\n", err);
+		} else {
+			printk("pwmclock: forced ON (%.0fHz)。建议执行 scan 使驱动切换 CLKIN 模式。\n", (double)rate);
+		}
+	} else if (strcmp(arg, "off") == 0) {
+		sys_sensor_clock_set_user_mode(SENSOR_CLOCK_FORCE_OFF);
+		float rate = 0;
+		sys_sensor_clock_apply(false, &rate);
+		printk("pwmclock: forced OFF。建议执行 scan 使驱动回退内部时钟。\n");
+	} else if (strcmp(arg, "auto") == 0) {
+		sys_sensor_clock_set_user_mode(SENSOR_CLOCK_AUTO);
+		printk("pwmclock: auto 模式已恢复（按探测结果决定，执行 scan 生效）。\n");
+	} else {
+		printk("Error: unknown argument '%s'. Use 'pwmclock [on|off|auto|status]'.\n", arg);
+	}
 }
 
 static void console_cmd_calibrate(size_t argc, char **argv)
@@ -2159,6 +2199,7 @@ static const struct console_cmd console_cmds[] = {
 	{"reboot", console_cmd_reboot},
 	{"battery", console_cmd_battery},
 	{"scan", console_cmd_scan},
+	{"pwmclock", console_cmd_pwmclock},
 	{"calibrate", console_cmd_calibrate},
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION
 	{"sens", console_cmd_sens},

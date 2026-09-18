@@ -167,6 +167,79 @@ void configure_sense_pins(void)
 #endif
 }
 
+// --- IMUCLK 门控状态（nini 注入）---
+static enum sensor_clock_user_mode sensor_clock_user_mode_state = SENSOR_CLOCK_AUTO;
+static bool sensor_clock_applied = false;
+static float sensor_clock_applied_rate = 0;
+
+// 统一决策口：手动位覆盖自动逻辑；disable 方向永远放行（关机/休眠不受拦截）。
+// 已开启时重复 apply 为幂等（不重复使能 PWM）。
+int sys_sensor_clock_apply(bool auto_want, float *actual_rate)
+{
+	bool want;
+
+	switch (sensor_clock_user_mode_state) {
+	case SENSOR_CLOCK_FORCE_ON:
+		want = true;
+		break;
+	case SENSOR_CLOCK_FORCE_OFF:
+		want = false;
+		break;
+	default:
+		want = auto_want;
+		break;
+	}
+
+	if (!want) {
+		float dummy;
+		int ret = set_sensor_clock(false, 0, actual_rate ? actual_rate : &dummy);
+		sensor_clock_applied = false;
+		sensor_clock_applied_rate = 0;
+		return ret;
+	}
+
+	if (sensor_clock_applied && sensor_clock_applied_rate > 0) {
+		if (actual_rate) {
+			*actual_rate = sensor_clock_applied_rate;
+		}
+		return 0;
+	}
+
+	float rate = 0;
+	int ret = set_sensor_clock(true, 32768, &rate);
+	sensor_clock_applied = (ret == 0 && rate > 0);
+	sensor_clock_applied_rate = sensor_clock_applied ? rate : 0;
+	if (actual_rate) {
+		*actual_rate = sensor_clock_applied_rate;
+	}
+	if (sensor_clock_user_mode_state == SENSOR_CLOCK_FORCE_ON && ret != 0) {
+		// 手动强制开但失败：提示排查 P0.02 输出/接线（自动路径由驱动探活兜底，不重试）
+		LOG_WRN("pwmclock force-on failed (no clk_en/pwmclock node?)");
+	}
+	return ret;
+}
+
+void sys_sensor_clock_set_user_mode(enum sensor_clock_user_mode mode)
+{
+	sensor_clock_user_mode_state = mode;
+}
+
+enum sensor_clock_user_mode sys_sensor_clock_get_user_mode(void)
+{
+	return sensor_clock_user_mode_state;
+}
+
+bool sys_sensor_clock_is_applied(void)
+{
+	return sensor_clock_applied;
+}
+
+float sys_sensor_clock_last_rate(void)
+{
+	return sensor_clock_applied_rate;
+}
+
+
 static bool nvs_init = false;
 
 static inline bool sys_nvs_init(void)

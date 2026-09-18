@@ -411,6 +411,24 @@ LOG_MODULE_REGISTER(sensor, LOG_LEVEL_INF);
 
 static int sensor_scan_last_power_up_delay_ms = SENSOR_SCAN_COLD_POWER_UP_DELAY_MS;
 
+// IMUCLK 能力位：探测到的 IMU 是否需要/受益于外部 32768Hz 时钟（nini 注入）。
+// ICM-40608 无 CLKIN（DS-000251 实证：PIN9_FUNCTION 10b/11b 与 INTF_CONFIG1 bit2
+// 均为 Reserved）；LSM6/BMI 自带时钟。426xx/45686 配 CLKIN 后 ODR 标定从
+// ±80000ppm 收敛到 ~±50ppm（45686 另有内部回退）。
+static bool sensor_clock_imu_wants_ext = false;
+
+static bool imu_needs_ext_clock(int imu_id)
+{
+	switch (imu_id) {
+	case IMU_ICM42688:
+	case IMU_ICM42686:
+	case IMU_ICM45686:
+		return true;
+	default:
+		return false;
+	}
+}
+
 static int sensor_scan_retry_delay_ms(void)
 {
 	if (sensor_scan_last_power_up_delay_ms < SENSOR_SCAN_COLD_POWER_UP_DELAY_MS) {
@@ -766,15 +784,18 @@ int sensor_scan(void)
 		}
 	}
 #endif
+
 	sensor_wom_fast_wake_resume_pending = sensor_consume_wom_fast_wake_hint();
 	if (sensor_wom_fast_wake_resume_pending) {
 		LOG_INF("WOM fast-wake sensor resume requested");
 	}
 
 	sensor_scan_read();
-	// Enable external clock for IMU if hardware is available
+	// Enable external clock for IMU if hardware is available —— 门控：仅当手动
+	// 强制开，或上次已知 IMU（保留态快路径）需要外部时钟时才先开；探测完成
+	// 后会按实际型号再决策一次。无 IMU 时钟时 426xx/45686 探测不受影响。
 	float clock_actual_rate = 0;
-	int clock_err = set_sensor_clock(true, 32768, &clock_actual_rate);
+	int clock_err = sys_sensor_clock_apply(sensor_clock_imu_wants_ext, &clock_actual_rate);
 	if (clock_err == 0 && clock_actual_rate != 0) {
 		LOG_INF("Sensor clock enabled: %.2fHz", (double)clock_actual_rate);
 	}
@@ -815,6 +836,15 @@ int sensor_scan(void)
 			return -1; // an IMU was detected but not supported
 		} else {
 			sensor_imu = sensor_imus[imu_id];
+			// 按实际型号决策 IMUCLK（auto 模式下仅 42688/42686/45686 开启），
+			// 在驱动 init 读取 clock_rate 之前生效；开启后驱动自带 CLKIN 探活
+			// （10ms FIFO 计数，失败自动回退内部时钟）。
+			sensor_clock_imu_wants_ext = imu_needs_ext_clock(imu_id);
+			float clock_rate_after_scan = 0;
+			int clock_err2 = sys_sensor_clock_apply(sensor_clock_imu_wants_ext, &clock_rate_after_scan);
+			if (clock_err2 == 0 && clock_rate_after_scan != 0) {
+				LOG_INF("Sensor clock (post-scan) enabled: %.2fHz", (double)clock_rate_after_scan);
+			}
 		}
 	} else {
 		sensor_scan_clear(); // clear invalid sensor data
@@ -1625,9 +1655,10 @@ int sensor_init(void)
 		sensor_imu->shutdown(); // TODO: is this needed?
 	}
 
-	// Clock already enabled during sensor scan, just ensure it's still on
+	// Clock already enabled during sensor scan, just ensure it's still on ——
+	// 走同一门控决策口（手动位 + 能力位），关机/休眠的 disable 不经此处。
 	float clock_actual_rate = 0;
-	set_sensor_clock(true, 32768, &clock_actual_rate); // ensure clock source is still enabled
+	sys_sensor_clock_apply(sensor_clock_imu_wants_ext, &clock_actual_rate);
 
 	// wait for sensor register reset // TODO: is this needed?
 	k_usleep(250);
