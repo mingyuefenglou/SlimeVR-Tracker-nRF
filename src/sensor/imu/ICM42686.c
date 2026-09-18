@@ -27,6 +27,23 @@
 #define ICM42686_FIFO_ACCEL_EN 0x01
 #define ICM42686_INT_ASYNC_RESET 0x10
 
+// --- 滤波调优（DS-000639；nini 注入）---
+// UI 低通（GYRO_ACCEL_CONFIG0 0x52，bank0）：复位 0x11=max(400,ODR)/4；
+// 收紧为 accel 码3（/8≈62Hz@500）+ gyro 码5（/16≈31Hz@500）。VR 身体运动 <20Hz，
+// VQF 自带偏置估计（等效低通），31Hz 是通行保守档（ArduPilot 软件 INS_GYRO_FILTER
+// 默认 20Hz 同量级）。
+#define ICM42686_UI_FILT_VALUE 0x35
+// 陀螺 AAF（bank1 GYRO_CONFIG_STATIC3/4/5）：复位 DELT=63→3979Hz≈无抗混叠。
+// 取 DELT=5/DELTSQR=25/BITSHIFT=10 → 213Hz（§5.3 表）。⚠️ 必须低于抽取奈奎斯特
+// （500Hz ODR → 250Hz）：betaflight 的 258Hz 档（DELT=6）是按 8kHz 采样定的，
+// 直接照抄会越界——AAF 是绝对频率，不是相对档位。振动恶劣可收 DELT=4→170Hz。
+#define ICM42686_AAF_DELT      5
+#define ICM42686_AAF_DELTSQR   25
+#define ICM42686_AAF_BITSHIFT  10
+#define ICM42686_GYRO_CONFIG_STATIC3 0x0C
+#define ICM42686_GYRO_CONFIG_STATIC4 0x0D
+#define ICM42686_GYRO_CONFIG_STATIC5 0x0E
+
 // DS-000639: UI registers use the configured +/-32 g and +/-4000 dps ranges.
 static const float accel_sensitivity = 32.0f / 32768.0f;
 static const float gyro_sensitivity = 4000.0f / 32768.0f;
@@ -127,6 +144,29 @@ int icm42686_init(
 	last_gyro_odr = 0xff;
 	last_accel_mode = 0xff;
 	last_gyro_mode = 0xff;
+
+	// --- 滤波配置（双传感器 OFF 窗口：PWR_MGMT0 尚未写过，DS §12.9 铁律）---
+	// UI 低通 + 回读
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, 0x52, ICM42686_UI_FILT_VALUE);
+	uint8_t ui_filt_rb = 0;
+	err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, 0x52, &ui_filt_rb);
+	LOG_INF("ICM42686 UI filter 0x52 readback = 0x%02X (wrote 0x35 => accel ODR/8, gyro ODR/16)", ui_filt_rb);
+
+	// 陀螺 AAF（bank1）+ 回读
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM42686_REG_BANK_SEL, 0x01);
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM42686_GYRO_CONFIG_STATIC3, ICM42686_AAF_DELT & 0x3F);
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM42686_GYRO_CONFIG_STATIC4, ICM42686_AAF_DELTSQR & 0xFF);
+	err |= ssi_reg_write_byte(
+		SENSOR_INTERFACE_DEV_IMU,
+		ICM42686_GYRO_CONFIG_STATIC5,
+		((ICM42686_AAF_BITSHIFT & 0x0F) << 4) | ((ICM42686_AAF_DELTSQR >> 8) & 0x0F));
+	uint8_t aaf_rb[3] = {0};
+	err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, ICM42686_GYRO_CONFIG_STATIC3, &aaf_rb[0]);
+	err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, ICM42686_GYRO_CONFIG_STATIC4, &aaf_rb[1]);
+	err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, ICM42686_GYRO_CONFIG_STATIC5, &aaf_rb[2]);
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, ICM42686_REG_BANK_SEL, 0x00);
+	LOG_INF("ICM42686 gyro AAF readback = DELT 0x%02X DELTSQR 0x%02X%02X (wrote 5/0x19/10 => 3dB BW ~213Hz)",
+		aaf_rb[0], aaf_rb[2] & 0x0F, aaf_rb[1]);
 
 	err |= icm42686_update_odr(accel_period_s, gyro_period_s, accel_actual_period_s, gyro_actual_period_s);
 

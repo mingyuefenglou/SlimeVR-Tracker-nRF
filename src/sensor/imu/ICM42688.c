@@ -86,6 +86,9 @@ int icm_init(
 		ICM42688_FIFO_COUNT_RECORDS,
 		ICM42688_FIFO_COUNT_RECORDS
 	); // FIFO_COUNT and FIFO_WM use records
+	// Clear INT_CONFIG1.INT_ASYNC_RESET (bit4, reset=1)。DS §12.6：须清 0 才能
+	// 保证 INT1/INT2 引脚正常工作（42686 版驱动已清，此处补齐同族一致性）。
+	err |= ssi_reg_update_byte(SENSOR_INTERFACE_DEV_IMU, 0x64, 0x10, 0x00);
 	clock_scale = 1.0f;
 	if (clock_rate > 0) {
 		clock_scale = clock_rate / clock_reference;
