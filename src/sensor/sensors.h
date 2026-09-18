@@ -41,6 +41,9 @@
 #if IS_ENABLED(CONFIG_SENSOR_DRV_ICM45686)
 #include "imu/ICM45686.h"
 #endif
+#if IS_ENABLED(CONFIG_SENSOR_DRV_ICM40608)
+#include "imu/ICM40608.h"
+#endif
 #if IS_ENABLED(CONFIG_SENSOR_DRV_LSM6DSM)
 #include "imu/LSM6DSM.h"
 #endif
@@ -87,6 +90,9 @@
 #if IS_ENABLED(CONFIG_SENSOR_DRV_QMC6309)
 #include "mag/QMC6309.h"
 #endif
+#if IS_ENABLED(CONFIG_SENSOR_DRV_QMC5883P)
+#include "mag/QMC5883P.h"
+#endif
 
 #include "scan.h"
 #include "scan_spi.h"
@@ -95,8 +101,8 @@
 #include "sensors_enum.h"
 
 /* Sized so ARRAY_SIZE() works for callers; keep in sync with sensors_tables.c. */
-#define SENSOR_DEV_IMU_COUNT (IMU_ISM330BX + 1)
-#define SENSOR_DEV_MAG_COUNT (MAG_ICT153XX + 1)
+#define SENSOR_DEV_IMU_COUNT (IMU_ICM40608 + 1)
+#define SENSOR_DEV_MAG_COUNT (MAG_QMC5883P + 1)
 
 extern const char *dev_imu_names[SENSOR_DEV_IMU_COUNT];
 extern const sensor_imu_t *sensor_imus[SENSOR_DEV_IMU_COUNT];
