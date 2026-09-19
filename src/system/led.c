@@ -79,6 +79,10 @@ static const struct pwm_dt_spec pwm_led2 = PWM_DT_SPEC_GET(DT_ALIAS(pwm_led2));
 static enum sys_led_pattern current_led_pattern;
 static int current_priority;
 
+// 磁校准进度（0-10000；校准线程写、LED 线程读）——全局定义，
+// 非三色板（传统路径）也要存在以供 cal_mag.c 链接（值不被消费，仅占位）
+volatile uint16_t led_cal_progress;
+
 #if LED_EXISTS || LED_STRIP_EXISTS
 static enum sys_led_pattern led_patterns[SYS_LED_PATTERN_DEPTH]
 	= {[0 ...(SYS_LED_PATTERN_DEPTH - 1)] = SYS_LED_PATTERN_OFF};
@@ -304,7 +308,6 @@ struct led_channel {
 static struct led_channel chans[LED_CH_COUNT];
 static enum led_display_mode led_mode = LED_MODE_DAILY;
 static uint16_t led_brightness_pptt = 10000; // 全局亮度乘数（一改全改）
-volatile uint16_t led_cal_progress;
 
 // 琥珀分量（充电/低电/OTA 的红绿混色比）
 #define AMBER_RED_PPTT 6000
@@ -770,6 +773,36 @@ uint8_t get_led_brightness(void)
 
 /* ==== 传统单仲裁路径（非三色板：行为与上游一致） ==== */
 #elif LED_EXISTS || LED_STRIP_EXISTS /* 传统单仲裁路径（非三色板：行为与上游一致） */
+
+// 双模式/全局亮度仅三通道板实现；传统板提供桩（console 可用、值不生效）
+static enum led_display_mode led_mode_legacy = LED_MODE_DAILY;
+static uint16_t led_brightness_pptt_legacy = 10000;
+
+void set_led_mode(enum led_display_mode mode)
+{
+	led_mode_legacy = mode;
+}
+
+enum led_display_mode get_led_mode(void)
+{
+	return led_mode_legacy;
+}
+
+void set_led_brightness(uint8_t percent)
+{
+	if (percent < 5) {
+		percent = 5;
+	}
+	if (percent > 100) {
+		percent = 100;
+	}
+	led_brightness_pptt_legacy = percent * 100;
+}
+
+uint8_t get_led_brightness(void)
+{
+	return led_brightness_pptt_legacy / 100;
+}
 
 void set_led(enum sys_led_pattern led_pattern, int priority)
 {
