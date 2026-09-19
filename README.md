@@ -1,70 +1,59 @@
-# SlimeNRF tracker firmware
+# NiNi 5883 追踪器固件（SlimeNRF tracker）
 
-Zephyr/NCS firmware for SlimeNRF motion trackers on Nordic nRF52 and nRF54L SoCs.
+基于 SlimeNRF 生态的 nRF52833 全身追踪器固件，为自研 5883 板定制。
 
-## Project history
+## 项目来源
 
-This firmware is originally based on [SlimeVR/SlimeVR-Tracker-nRF](https://github.com/SlimeVR/SlimeVR-Tracker-nRF). Thanks for their work and for maintaining the project.
+本固件沿袭并致谢以下项目：
 
-This repo was forked from [LyallUlric/Stacked-SmolSlime](https://github.com/LyallUlric/Stacked-SmolSlime) (stacked Promicro builds on top of the official tracker firmware), not from upstream `main`. When Stacked-SmolSlime stopped being maintained, We continued development here.
+- [SlimeVR/SlimeVR-Tracker-nRF](https://github.com/SlimeVR/SlimeVR-Tracker-nRF) —— 官方上游，SlimeVR 生态的奠基工作
+- [LyallUlric/Stacked-SmolSlime](https://github.com/LyallUlric/Stacked-SmolSlime) —— 叠层 Promicro 路线
+- [jitingcn/SlimeVR-Tracker-nRF](https://github.com/jitingcn/SlimeVR-Tracker-nRF) —— 本仓的直接基底（dev @ ad138bf，含 VQF 调参、TDMA、ESB OTA、在线磁校准、校准/静息/按键/电源事件上报等大量改进）
 
-A hard fork followed because upstream `main` history was hard-reset, development direction was unclear and slowly, and upstream discouraged AI agent coding. This fork keeps history from before that reset and continues development. It started from my personal gaming needs. It now also covers many requests from the community and from Chinese DIY SlimeVR-compatible tracker builders.
+本仓在其上做 5883 板移植与传感器驱动补充，上游演进会持续跟进合并。
 
-Changes are driven by real playtesting, user needs, and normal software engineering practice. Untested patches are not accepted on that basis alone.
+## 与 jiting 版的主要差异
 
-## Major differences from upstream
+- **新板 `nini_slimevr_5883_uf2`**：三颗共阴 LED（PWM 调光）、P0.18 释放为 nRESET、板载 32.768kHz 晶振、DCDC、无 FEM（完整引脚定义见 `boards/nini_slimevr/nini_slimevr_5883_uf2/` 板级文件）
+- **ICM-40608 驱动**（上游无此芯片支持）：16 字节 FIFO、±16g/±2000dps 量程、陀螺/加计双 AAF 抗混叠 + UI 低通调优
+- **QMC5883P 磁力计驱动**（QST 车规线，上游无）：0x2C 地址、8G 档 3750 LSB/G、原生 Single 模式、Suspend 中转、饱和拒收
+- **MMC5983MA 调优**：SET/RESET 时序 500µs、100Hz 档低噪声带宽、软件饱和检测
+- **ICM-42686/42688 滤波配置**：OFF 窗口写入 UI 低通 + 陀螺 AAF，补清 INT_ASYNC_RESET
+- **IMUCLK（pwmclock）门控**：32.768kHz 时钟输出默认关闭，探测到 ICM-4268x/45686 自动开启（驱动自带探活回退），亦可用 `pwmclock on|off|auto` 手动控制
 
-- Remote command from receiver side
-- Tweaked VQF fusion parameters and backend
-- Add mag support properly for ICM45686/LSM6DSV and QMC6309 (other mags are not well tested)
-- More sensor calibration options and features
-- Custom sdk-nrf fork with more features and fixes
-- Different TDMA radio scheduling, clock sync methods
-- OTA support via BLE/ESB
-- Configurable IMU/mag sensor driver whitelist
-- Resting state policy refinements, Different WoM policy
-- Raw sensor data collection and analysis
-- Best-effort calibration, rest, button-group, and power-intent events reports
-- Experimental EqF fusion backend
-- More community board vendors and Promicro variants
+## SDK 与编译环境
 
-## SDK and build environment
+`west.yml` 选定 [jitingcn/sdk-nrf](https://github.com/jitingcn/sdk-nrf) `v3.4-branch`（pin ab62f8df，基于官方 NCS v3.4.0）。
 
-`west.yml` selects [jitingcn/sdk-nrf](https://github.com/jitingcn/sdk-nrf)
-`v3.4-branch`, based on the official NCS `v3.4.0` release.
+构建需要 **Zephyr SDK 1.0.1 GNU**（`zephyr/gnu`，GCC 14.3.0）与 **Python 3.12**；固件用 Picolibc，CI 在 Ubuntu 24.04 上跑。固件依赖该 SDK fork 的 ESB 扩展与 USB 修复，官方 NCS 不能直接替换。
 
-Builds require Zephyr SDK **1.0.1 GNU** (`zephyr/gnu`, GCC 14.3.0) and
-**Python 3.12**. The firmware uses Picolibc; CI runs on Ubuntu 24.04.
+```bash
+west init -l app
+west update
+export ZEPHYR_SDK_INSTALL_DIR=/opt/zephyr-sdk-1.0.1
+west build -b nini_slimevr_5883_uf2 -d build --sysbuild --pristine -s app -- \
+  -DBOARD_ROOT=$PWD/app
+# 产物：build/app/zephyr/zephyr.uf2 / .hex / .elf
+```
 
-The firmware depends on the SDK's ESB extensions and USB fixes; stock NCS
-is not a drop-in replacement. UF2 generation uses `CONFIG_BUILD_OUTPUT_HEX=y`
-to read image addresses from HEX output. The SDK includes the
-[upstream HEX-first UF2 fix](https://github.com/zephyrproject-rtos/zephyr/pull/107944)
-required for mapped partitions.
+## LED 状态（当前为上游默认行为，状态机定制开发中）
 
-## Tracker events
+| 场景 | 表现 |
+|---|---|
+| 正常工作 | 蓝心跳（亮 300ms / 10s 周期） |
+| 对频中（开机长按 1-5s 松开） | 蓝短闪（100ms 亮/900ms 灭） |
+| 对频成功 | 绿 4 连闪 |
+| 充电中 | 琥珀呼吸（5s 周期，红 60%+绿 40%） |
+| 充满 | 绿 20% 亮度常亮 |
+| 低电（<10%） | 琥珀暗闪（500/500） |
+| ESB OTA 中 | 琥珀快闪（100/100） |
+| 传感器/连接/系统错误 | 红每 5s 闪 2/3/4 次（多错轮播） |
+| 按住按键 | 蓝常亮 |
+| 关机 | 蓝渐灭（约 1s）后全灭 |
+| WOM 睡眠 | 全灭 |
 
-Matching receiver firmware can expose calibration lifecycle, tracker rest,
-fusion rest, completed button groups, and impending WOM/shutdown notifications
-through its `scripts/hid_cmd.py` client. See the
-[receiver event guide](https://github.com/jitingcn/SlimeVR-Tracker-nRF-Receiver#tracker-events)
-for subscriptions and calibration watches.
+Bootloader 侧：DFU 未挂载 U 盘 = 蓝快呼吸（300ms）；挂载后 = 蓝慢呼吸（3s）；写入中 = 蓝急闪（100ms）；红灯 2s 周期呼吸信标。
 
-This is a bounded, best-effort channel, not a reliable action log. Rest reports
-are current observations; button groups are distinct actions; power reports
-are intentions, not confirmation that sleep or shutdown completed. Radio
-admission and finite repetitions do not guarantee delivery. Notifications never
-delay shutdown.
+## 许可
 
-## License
-
-Unless otherwise specified, all code in this repository is dual-licensed under either:
-
-- MIT License ([LICENSE-MIT](LICENSE-MIT) or https://opensource.org/license/mit/)
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or https://opensource.org/license/apache-2-0/)
-
-at your option. This means you can select the license you prefer!
-
-Unless you explicitly state otherwise, any contribution intentionally submitted for
-inclusion in the work by you, as defined in the Apache-2.0 license, shall be dual
-licensed as above, without any additional terms or conditions.
+沿袭上游 Apache-2.0 / MIT 双许可，见 `LICENSE-APACHE` / `LICENSE-MIT`。
