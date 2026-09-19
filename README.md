@@ -10,7 +10,7 @@
 * [LyallUlric/Stacked-SmolSlime](https://github.com/LyallUlric/Stacked-SmolSlime) —— 叠层 Promicro 路线
 * [jitingcn/SlimeVR-Tracker-nRF](https://github.com/jitingcn/SlimeVR-Tracker-nRF) —— 本仓的直接基底（dev @ ad138bf，含 VQF 调参、TDMA、ESB OTA、在线磁校准、校准/静息/按键/电源事件上报等大量改进）
 
-本仓在其上做 5883 板移植与传感器驱动补充，上游演进会持续跟进合并。
+本仓在其上做移植与传感器驱动补充，上游演进会持续跟进合并。
 
 ## 主要差异
 
