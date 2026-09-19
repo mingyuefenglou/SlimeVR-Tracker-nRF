@@ -28,6 +28,8 @@ void set_status(enum sys_status status, bool set) {
 			LOG_ERR("Sensor communication error");
 			break;
 		case SYS_STATUS_CONNECTION_ERROR:
+			// 链路已断，蓝心跳无意义——清 CONNECTION 槽，让错误独占呈现
+			set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_CONNECTION);
 			LOG_WRN("Connection error");
 			break;
 		case SYS_STATUS_SYSTEM_ERROR:

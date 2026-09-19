@@ -353,6 +353,17 @@ void sys_ota_reboot_resolve(bool prepared)
 	power_request_ota_resolve(&power_requests, prepared, &power_wake_sem);
 }
 
+// USB 通讯中（CDC 串口会话活跃）：调参/日志场景——不应自动睡眠，充满灯不静默
+static bool usb_comms_active(void)
+{
+	return get_status(SYS_STATUS_SERIAL_ACTIVE) != 0;
+}
+
+// 充电静默：充满且插线保持且无通讯 → 3 分钟后熄灭全部灯光（拔线/通讯/按键/错误恢复）
+#define CHARGING_QUIET_DELAY_MS (3 * 60 * 1000)
+static int64_t charged_since_ms;
+static bool charging_quiet;
+
 /* Returns true when the power request is consumed; false to keep it queued. */
 static bool sys_WOM(bool force) // TODO: if IMU interrupt does not exist what does the system do?
 {
@@ -360,6 +371,10 @@ static bool sys_WOM(bool force) // TODO: if IMU interrupt does not exist what do
 	/* Block sleep during OTA (active or suppressed) */
 	if (esb_ota_is_active() || connection_get_ota_suppressed()) {
 		LOG_INF("IMU wake up blocked by OTA");
+		return true; /* consume; sensor re-requests after next idle cycle */
+	}
+	/* Block sleep while USB communications are active (调参/日志会话中不自动睡眠) */
+	if (usb_comms_active()) {
 		return true; /* consume; sensor re-requests after next idle cycle */
 	}
 #if IMU_INT_EXISTS
@@ -680,16 +695,36 @@ static void power_thread(void)
 			battery_mV
 		);
 
-		if (charging)
+		if (charging || (!charged && (plugged || usb_plugged || pmic_plugged))) {
+			// 充电中（含插线未满）：琥珀常亮直到充满（呼吸族/常亮由分配表决定）
+			charging_quiet = false;
+			charged_since_ms = 0;
 			set_led(SYS_LED_PATTERN_PULSE_PERSIST, SYS_LED_PRIORITY_SYSTEM);
-		else if (charged)
-			set_led(SYS_LED_PATTERN_ON_PERSIST, SYS_LED_PRIORITY_SYSTEM);
-		else if (plugged || usb_plugged || pmic_plugged)
-			set_led(SYS_LED_PATTERN_PULSE_PERSIST, SYS_LED_PRIORITY_SYSTEM);
-		else if (power_battery_is_low())
+		} else if (charged) {
+			// 充满插线保持：无 USB 通讯 3 分钟后静默全灭；任何活动立即恢复
+			bool plugged_any = plugged || usb_plugged || pmic_plugged;
+			if (!plugged_any || usb_comms_active()) {
+				charging_quiet = false;
+				charged_since_ms = 0;
+			} else if (!charging_quiet) {
+				if (charged_since_ms == 0) {
+					charged_since_ms = k_uptime_get();
+				}
+				if (k_uptime_get() - charged_since_ms > CHARGING_QUIET_DELAY_MS) {
+					charging_quiet = true;
+					LOG_INF("Charging quiet: LEDs off (plugged & full, no comms)");
+				}
+			}
+			if (charging_quiet) {
+				set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_SYSTEM);
+			} else {
+				set_led(SYS_LED_PATTERN_ON_PERSIST, SYS_LED_PRIORITY_SYSTEM);
+			}
+		} else if (power_battery_is_low()) {
 			set_led(SYS_LED_PATTERN_LONG_PERSIST, SYS_LED_PRIORITY_SYSTEM);
-		else
+		} else {
 			set_led(SYS_LED_PATTERN_ACTIVE_PERSIST, SYS_LED_PRIORITY_SYSTEM);
+		}
 //			set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_SYSTEM);
 
 		/* Feed watchdog at end of each loop iteration */

@@ -1824,7 +1824,9 @@ void esb_pair(void)
 			esb_send_pair_step(2); // "acknowledge" pairing from receiver
 			k_msleep(996);
 		}
-		set_led(SYS_LED_PATTERN_ONESHOT_COMPLETE, SYS_LED_PRIORITY_CONNECTION);
+		// 三通道：绿单次渐亮确认（HIGHEST，自清理）+ 蓝链路心跳常驻（CONNECTION 槽）
+		set_led(SYS_LED_PATTERN_CONNECT_HEARTBEAT, SYS_LED_PRIORITY_CONNECTION);
+		set_led(SYS_LED_PATTERN_ONESHOT_COMPLETE, SYS_LED_PRIORITY_HIGHEST);
 		LOG_INF("Paired");
 		/* RX only copied the identity; entropy and queue reset belong here,
 		 * in the pairing thread, before the new radio session is ready. */

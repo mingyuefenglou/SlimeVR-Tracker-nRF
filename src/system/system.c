@@ -723,6 +723,8 @@ bool button_read(void)
 }
 
 #if BUTTON_EXISTS // Alternate button if available to use as "reset key"
+static bool shutdown_hint_on;
+
 static void button_thread(void)
 {
 	int num_presses = 0;
@@ -777,7 +779,20 @@ static void button_thread(void)
 			set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_HIGHEST);
 			set_status(SYS_STATUS_BUTTON_PRESSED, false);
 		}
-		if (press_time && k_uptime_get() - press_time > 1000 && button_read()) // Button is being held
+		// 2s 触发关机流程（原 1s）；触发前绿快闪预告「将要关机」
+		// 关机预告：按住 1.2s 起绿快闪提示（2s 才真正执行；0.8s 窗口给用户反悔机会）
+		if (press_time && button_read() && k_uptime_get() - press_time > 1200 &&
+		    k_uptime_get() - press_time <= 2000) {
+			if (!shutdown_hint_on) {
+				shutdown_hint_on = true;
+				set_led(SYS_LED_PATTERN_FLASH, SYS_LED_PRIORITY_HIGHEST);
+			}
+		} else if (shutdown_hint_on && (!press_time || !button_read())) {
+			shutdown_hint_on = false;
+			set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_HIGHEST);
+		}
+
+		if (press_time && k_uptime_get() - press_time > 2000 && button_read()) // Button is being held
 		{
 			if (ota_busy) {
 				LOG_INF("Button hold blocked by OTA");

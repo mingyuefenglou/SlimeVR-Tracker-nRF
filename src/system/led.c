@@ -280,11 +280,501 @@ static void led_pin_set(enum sys_led_color color, int brightness_pptt, int value
 }
 #endif
 
+/* =====================================================================
+ * 三通道并行渲染（LED_TRI_COLOR 板专用）
+ * 红/绿/蓝各自独立仲裁+相位机：「工作绿呼吸」与「链路蓝心跳」可同时呈现。
+ * 分配表（日常=呼吸族/调试=闪烁族）由 pattern_mask + led_compute 承载。
+ * 命脉：非暗态分支的 led_resume() 不可省略（PWM 设备必须 ACTIVE 才有输出）。
+ * ===================================================================== */
+#if defined(LED_TRI_COLOR) && (LED_EXISTS || LED_STRIP_EXISTS)
+
+enum led_ch { LED_CH_R = 0, LED_CH_G = 1, LED_CH_B = 2, LED_CH_COUNT };
+
+#define CH_R (1u << LED_CH_R)
+#define CH_G (1u << LED_CH_G)
+#define CH_B (1u << LED_CH_B)
+#define CH_ALL (CH_R | CH_G | CH_B)
+
+struct led_channel {
+	enum sys_led_pattern pattern; // 本通道当前渲染的 pattern（OFF 表示暗）
+	uint32_t state;               // 相位状态（oneshot 步进计数）
+	uint32_t last_value;          // 输出值缓存（去抖）
+};
+
+static struct led_channel chans[LED_CH_COUNT];
+static enum led_display_mode led_mode = LED_MODE_DAILY;
+static uint16_t led_brightness_pptt = 10000; // 全局亮度乘数（一改全改）
+volatile uint16_t led_cal_progress;
+
+// 琥珀分量（充电/低电/OTA 的红绿混色比）
+#define AMBER_RED_PPTT 6000
+#define AMBER_GREEN_PPTT 4000
+
+// pattern → 通道掩码（分配表·通道语义；两模式相同，手法差异在 led_compute）
+static uint32_t pattern_mask(enum sys_led_pattern p)
+{
+	switch (p) {
+	case SYS_LED_PATTERN_OFF_FORCE:
+	case SYS_LED_PATTERN_OFF:
+	case SYS_LED_PATTERN_ONESHOT_POWEROFF:
+	case SYS_LED_PATTERN_ERROR_A:
+	case SYS_LED_PATTERN_ERROR_B:
+	case SYS_LED_PATTERN_ERROR_C:
+	case SYS_LED_PATTERN_ERROR_D:
+		return CH_ALL; // 错误独占三灯 / 全局关
+	case SYS_LED_PATTERN_ON:
+	case SYS_LED_PATTERN_ONESHOT_POWERON:
+	case SYS_LED_PATTERN_ONESHOT_PING:
+	case SYS_LED_PATTERN_SHORT:
+	case SYS_LED_PATTERN_CONNECT_HEARTBEAT:
+		return CH_B; // 蓝=链路/即时反馈
+	case SYS_LED_PATTERN_LONG:
+	case SYS_LED_PATTERN_FLASH:
+	case SYS_LED_PATTERN_ONESHOT_PROGRESS:
+	case SYS_LED_PATTERN_ONESHOT_COMPLETE:
+	case SYS_LED_PATTERN_ON_PERSIST:
+	case SYS_LED_PATTERN_ACTIVE_PERSIST:
+		return CH_G; // 绿=生命体征/确认
+	case SYS_LED_PATTERN_LONG_PERSIST:
+	case SYS_LED_PATTERN_PULSE_PERSIST:
+	case SYS_LED_PATTERN_DFU:
+		return CH_R | CH_G; // 琥珀=电池域（红绿协同）
+	case SYS_LED_PATTERN_CAL_PROGRESS:
+		return CH_R | CH_G; // 红→绿进度渐变
+	default:
+		return CH_ALL;
+	}
+}
+
+// 三角呼吸：phase 在 [0,period)，[0,up) 线性升至 peak，[up,up+down) 线性降回 0，其余 0
+static uint32_t breath_shape(uint32_t phase, uint32_t period, uint32_t up, uint32_t down, uint32_t peak)
+{
+	if (phase < up) {
+		return peak * phase / up;
+	}
+	if (phase < up + down) {
+		return peak * (up + down - phase) / down;
+	}
+	return 0;
+}
+
+// 计算某通道在 pattern 下的输出（0-10000 pptt）与建议刷新步距
+static uint32_t led_compute(enum led_ch ch, enum sys_led_pattern p, uint32_t *state, uint32_t *step_ms)
+{
+	const uint32_t now = k_uptime_get_32();
+	const bool daily = (led_mode == LED_MODE_DAILY);
+	uint32_t v = 0;
+	uint32_t st = 5; // 默认步距
+
+	switch (p) {
+	case SYS_LED_PATTERN_OFF_FORCE:
+	case SYS_LED_PATTERN_OFF:
+		v = 0;
+		st = 100;
+		break;
+
+	case SYS_LED_PATTERN_ON:
+		v = daily ? 5000 : 10000;
+		st = 200;
+		break;
+
+	case SYS_LED_PATTERN_ACTIVE_PERSIST: { // 绿·工作
+		if (daily) {
+			// 慢呼吸：10s 周期（2s 升+2s 降+6s 灭），峰 25%
+			v = breath_shape(now % 10000, 10000, 2000, 2000, 2500);
+			st = 20;
+		} else {
+			v = (now % 10000) < 300 ? 10000 : 0; // 300ms blip/10s
+			st = 50;
+		}
+		break;
+	}
+
+	case SYS_LED_PATTERN_CONNECT_HEARTBEAT: { // 蓝·链路心跳（与绿错峰 2.5s）
+		uint32_t phase = (now + 7500) % 10000; // 相位后移 2.5s → 两峰永不撞
+		if (daily) {
+			v = breath_shape(phase, 10000, 2500, 2500, 3000);
+			st = 20;
+		} else {
+			v = phase < 300 ? 10000 : 0;
+			st = 50;
+		}
+		break;
+	}
+
+	case SYS_LED_PATTERN_SHORT: { // 蓝·未配对/搜台
+		if (daily) {
+			// 双短呼吸：4s 周期内两次 300ms 起伏（0 与 1.0s 处），峰 40%
+			uint32_t phase = now % 4000;
+			v = breath_shape(phase, 4000, 300, 300, 4000);
+			if (phase >= 1000 && phase < 1600) {
+				v = breath_shape(phase - 1000, 600, 300, 300, 4000);
+			}
+			st = 20;
+		} else {
+			v = (now % 1000) < 100 ? 10000 : 0; // 100/900 快闪
+			st = 50;
+		}
+		break;
+	}
+
+	case SYS_LED_PATTERN_LONG:
+		v = (now % 1000) < 500 ? 10000 : 0;
+		st = 50;
+		break;
+	case SYS_LED_PATTERN_FLASH:
+		v = (now % 400) < 200 ? 10000 : 0;
+		st = 40;
+		break;
+
+	case SYS_LED_PATTERN_ONESHOT_POWERON: { // 开机：日常=蓝渐亮一次；调试=3 连闪
+		uint32_t i = (*state)++;
+		if (daily) {
+			if (i == 0) {
+				v = 0;
+				st = 100;
+			} else if (i <= 30) { // 600ms 升
+				v = 6000 * i / 30;
+				st = 20;
+			} else if (i <= 60) { // 600ms 降
+				v = 6000 * (60 - i) / 30;
+				st = 20;
+			} else {
+				set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_HIGHEST);
+				v = 0;
+				st = 100;
+			}
+		} else {
+			v = !(i % 2) * 10000;
+			if (i == 7) {
+				set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_HIGHEST);
+			}
+			st = 200;
+		}
+		break;
+	}
+
+	case SYS_LED_PATTERN_ONESHOT_POWEROFF: { // 全彩渐灭（两模式同款）：250ms 全灭后 ~1s 线性渐灭
+		uint32_t i = (*state)++;
+		if (i == 0) {
+			v = 0;
+			st = 250;
+		} else if (i <= 200) {
+			v = (201 - i) * 50; // 10000 → 0，每 5ms 一步
+			st = 5;
+		} else {
+			set_led(SYS_LED_PATTERN_OFF_FORCE, SYS_LED_PRIORITY_HIGHEST);
+			v = 0;
+			st = 100;
+		}
+		break;
+	}
+
+	case SYS_LED_PATTERN_ONESHOT_PROGRESS: { // 确认：日常=单次渐亮渐灭；调试=2 连闪
+		uint32_t i = (*state)++;
+		if (daily) {
+			if (i <= 60) { // 1.2s：600 升 + 600 降
+				v = (i <= 30) ? 7000 * i / 30 : 7000 * (60 - i) / 30;
+				st = 20;
+			} else {
+				set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_HIGHEST);
+				st = 100;
+			}
+		} else {
+			v = !(i % 2) * 10000;
+			if (i == 5) {
+				set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_HIGHEST);
+			}
+			st = 200;
+		}
+		break;
+	}
+
+	case SYS_LED_PATTERN_ONESHOT_COMPLETE: { // 完成：日常=饱满单次渐亮渐灭；调试=4 连闪
+		uint32_t i = (*state)++;
+		if (daily) {
+			if (i <= 60) { // 1.2s
+				v = (i <= 30) ? 10000 * i / 30 : 10000 * (60 - i) / 30;
+				st = 20;
+			} else {
+				set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_HIGHEST);
+				st = 100;
+			}
+		} else {
+			v = !(i % 2) * 10000;
+			if (i == 9) {
+				set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_HIGHEST);
+			}
+			st = 200;
+		}
+		break;
+	}
+
+	case SYS_LED_PATTERN_ONESHOT_PING: {
+		uint32_t i = (*state)++;
+		v = (i % 2) * 10000;
+		if (i == 20) {
+			set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_HIGHEST);
+		}
+		st = 200;
+		break;
+	}
+
+	case SYS_LED_PATTERN_ON_PERSIST: // 充满：绿浅常亮
+		v = daily ? 500 : 2000;
+		st = 500;
+		break;
+
+	case SYS_LED_PATTERN_PULSE_PERSIST: { // 充电中：琥珀低亮度常亮直到充满
+		uint32_t mix = (ch == LED_CH_R) ? AMBER_RED_PPTT : AMBER_GREEN_PPTT;
+		if (daily) {
+			// 15% 常亮 + ±5% 极微呼吸（3s 周期）防死板
+			uint32_t wob = breath_shape(now % 3000, 3000, 1500, 1500, 500);
+			v = mix * (1500 + wob) / 10000;
+			st = 40;
+		} else {
+			v = mix * 3000 / 10000; // 30% 常亮
+			st = 200;
+		}
+		break;
+	}
+
+	case SYS_LED_PATTERN_LONG_PERSIST: { // 低电：琥珀虚弱呼吸 / 双闪
+		uint32_t mix = (ch == LED_CH_R) ? AMBER_RED_PPTT : AMBER_GREEN_PPTT;
+		if (daily) {
+			v = mix * breath_shape(now % 6000, 6000, 750, 750, 2000) / 10000;
+			st = 20;
+		} else {
+			uint32_t phase = now % 1050;
+			bool on = (phase < 150) || (phase >= 300 && phase < 450);
+			v = on ? mix * 2000 / 10000 : 0;
+			st = 30;
+		}
+		break;
+	}
+
+	case SYS_LED_PATTERN_DFU: { // OTA：琥珀流动快呼吸 / 快闪
+		uint32_t mix = (ch == LED_CH_R) ? 5500 : 4500;
+		if (daily) {
+			v = mix * breath_shape(now % 1200, 1200, 600, 600, 8200) / 10000;
+			st = 15;
+		} else {
+			v = (now % 200) < 100 ? mix : 0;
+			st = 50;
+		}
+		break;
+	}
+
+	case SYS_LED_PATTERN_CAL_PROGRESS: { // 磁校准：红→绿随进度插值（日常招牌）
+		uint32_t prog = led_cal_progress;
+		if (prog > 10000) {
+			prog = 10000;
+		}
+		uint32_t base = (ch == LED_CH_R) ? (10000 - prog) : prog;
+		if (daily) {
+			uint32_t wob = breath_shape(now % 2000, 2000, 1000, 1000, 1000); // ±10% 微呼吸
+			v = base * (9000 + wob) / 10000;
+			st = 20;
+		} else {
+			v = ((now % 1000) < 500) ? base : 0; // 离散硬闪，颜色即进度
+			st = 50;
+		}
+		break;
+	}
+
+	case SYS_LED_PATTERN_ERROR_A:
+	case SYS_LED_PATTERN_ERROR_B:
+	case SYS_LED_PATTERN_ERROR_C:
+	case SYS_LED_PATTERN_ERROR_D: { // 错误独占三灯
+		if (daily) {
+			// 每 5s 一次红深呼吸（1.2s 起伏，峰 50%）——克制但绝不错过
+			if (ch == LED_CH_R) {
+				v = breath_shape(now % 5000, 5000, 600, 600, 5000);
+			}
+			st = 20;
+		} else {
+			// 三色轮播：红→绿→蓝各 500ms 硬切（通道即颜色）
+			uint32_t seg = (now / 500) % 3;
+			v = (seg == (uint32_t)ch) ? 10000 : 0;
+			st = 50;
+		}
+		break;
+	}
+
+	default:
+		v = 0;
+		st = 100;
+		break;
+	}
+
+	*step_ms = st;
+	return v;
+}
+
+// 某通道的当前归属 pattern（自槽 0 向下扫；OFF 让位；掩码命中才 claim）
+static enum sys_led_pattern resolve_channel(enum led_ch ch)
+{
+	for (int prio = 0; prio < SYS_LED_PATTERN_DEPTH; prio++) {
+		enum sys_led_pattern p = led_patterns[prio];
+		if (p == SYS_LED_PATTERN_OFF) {
+			continue; // yield
+		}
+		if (pattern_mask(p) & (1u << ch)) {
+			return p;
+		}
+	}
+	return SYS_LED_PATTERN_OFF;
+}
+
+// 渐灭需要把 value 转 PWM 占空（含全局亮度乘数）
+static void led_channels_apply(void)
+{
+	const uint32_t br = led_brightness_pptt;
+	uint32_t vr = chans[LED_CH_R].last_value * br / 10000;
+	uint32_t vg = chans[LED_CH_G].last_value * br / 10000;
+	uint32_t vb = chans[LED_CH_B].last_value * br / 10000;
+	if (vr > 10000) {
+		vr = 10000;
+	}
+	if (vg > 10000) {
+		vg = 10000;
+	}
+	if (vb > 10000) {
+		vb = 10000;
+	}
+	pwm_set_pulse_dt(&pwm_led, pwm_led.period / 10000 * vr);
+	pwm_set_pulse_dt(&pwm_led1, pwm_led1.period / 10000 * vg);
+	pwm_set_pulse_dt(&pwm_led2, pwm_led2.period / 10000 * vb);
+}
+
+static bool led_any_on;
+
+static void led_thread(void)
+{
+	// 开机从 retained 恢复显示偏好（0xFF=未初始化 → 默认日常/100%）
+	if (retained->led_mode == (uint8_t)LED_MODE_DEBUG) {
+		led_mode = LED_MODE_DEBUG;
+	}
+	if (retained->led_bright >= 5 && retained->led_bright <= 100) {
+		led_brightness_pptt = retained->led_bright * 100;
+	}
+	led_resume(); // 进线程即确保 PWM 设备 ACTIVE（命脉）
+	while (1) {
+		uint32_t min_step = 100;
+		for (int ch = 0; ch < LED_CH_COUNT; ch++) {
+			enum sys_led_pattern p = resolve_channel(ch);
+			if (p != chans[ch].pattern) {
+				chans[ch].pattern = p;
+				chans[ch].state = 0; // 相位重置
+			}
+			uint32_t step = 100;
+			uint32_t v = led_compute(ch, p, &chans[ch].state, &step);
+			chans[ch].last_value = v;
+			if (step < min_step) {
+				min_step = step;
+			}
+		}
+		led_channels_apply();
+
+		const bool on = chans[LED_CH_R].pattern > SYS_LED_PATTERN_OFF ||
+				chans[LED_CH_G].pattern > SYS_LED_PATTERN_OFF ||
+				chans[LED_CH_B].pattern > SYS_LED_PATTERN_OFF;
+		led_any_on = on;
+		if (!on) {
+			led_suspend();
+			k_thread_suspend(led_thread_id);
+			// 唤醒由 set_led 负责（含 led_resume 命脉）
+		}
+		k_msleep(min_step);
+	}
+}
+
+void set_led(enum sys_led_pattern led_pattern, int priority)
+{
+	if (k_current_get() == led_thread_id && led_pattern <= SYS_LED_PATTERN_OFF) {
+		// 线程自清理：清掉承载当前 oneshot 的槽（ONESHOT 完成回 OFF）
+		for (int prio = 0; prio < SYS_LED_PATTERN_DEPTH; prio++) {
+			if (led_patterns[prio] >= SYS_LED_PATTERN_ONESHOT_POWERON &&
+			    led_patterns[prio] <= SYS_LED_PATTERN_ONESHOT_PING) {
+				led_patterns[prio] = SYS_LED_PATTERN_OFF;
+			}
+		}
+		if (led_pattern == SYS_LED_PATTERN_OFF_FORCE) {
+			// OFF_FORCE 语义：压制一切（写进所请求槽并清其余）
+			for (int prio = 0; prio < SYS_LED_PATTERN_DEPTH; prio++) {
+				led_patterns[prio] = SYS_LED_PATTERN_OFF;
+			}
+			led_patterns[priority == SYS_LED_PRIORITY_HIGHEST ? 0 : priority] = led_pattern;
+		}
+	} else {
+		led_patterns[priority] = led_pattern;
+	}
+
+	bool any = false;
+	for (int ch = 0; ch < LED_CH_COUNT; ch++) {
+		if (resolve_channel(ch) > SYS_LED_PATTERN_OFF) {
+			any = true;
+			break;
+		}
+	}
+
+	if (!any) {
+		if (led_any_on) {
+			led_any_on = false;
+			led_suspend();
+			k_thread_suspend(led_thread_id);
+		}
+		return;
+	}
+
+	if (k_current_get() != led_thread_id) {
+		k_thread_suspend(led_thread_id);
+		led_resume(); // 命脉：非暗态必须走完整 resume（pm RESUME + pin init）
+		k_thread_resume(led_thread_id);
+		k_wakeup(led_thread_id);
+	} else {
+		led_resume();
+		k_thread_resume(led_thread_id);
+	}
+}
+
+void set_led_mode(enum led_display_mode mode)
+{
+	led_mode = mode;
+	retained->led_mode = (uint8_t)mode;
+	retained_update();
+}
+
+enum led_display_mode get_led_mode(void)
+{
+	return led_mode;
+}
+
+void set_led_brightness(uint8_t percent)
+{
+	if (percent < 5) {
+		percent = 5;
+	}
+	if (percent > 100) {
+		percent = 100;
+	}
+	led_brightness_pptt = percent * 100;
+	retained->led_bright = percent;
+	retained_update();
+}
+
+uint8_t get_led_brightness(void)
+{
+	return led_brightness_pptt / 100;
+}
+
+/* ==== 传统单仲裁路径（非三色板：行为与上游一致） ==== */
+#elif LED_EXISTS || LED_STRIP_EXISTS /* 传统单仲裁路径（非三色板：行为与上游一致） */
+
 void set_led(enum sys_led_pattern led_pattern, int priority)
 {
 	LOG_DBG("set_led: current_led_pattern %d, current_priority %d", current_led_pattern, current_priority);
 	LOG_DBG("set_led: pattern %d, priority %d", led_pattern, priority);
-#if LED_EXISTS || LED_STRIP_EXISTS
 	if (led_pattern <= SYS_LED_PATTERN_OFF && k_current_get() == led_thread_id) {
 		led_patterns[current_priority] = led_pattern;
 	} else {
@@ -321,15 +811,10 @@ void set_led(enum sys_led_pattern led_pattern, int priority)
 		k_wakeup(led_thread_id);
 		LOG_DBG("set_led: resumed led_thread_id");
 	}
-#endif
 }
 
 static void led_thread(void)
 {
-#if !LED_EXISTS && !LED_STRIP_EXISTS
-	LOG_WRN("LED GPIO does not exist");
-	return;
-#else
 	while (1) {
 		LOG_DBG("led_thread: current_led_pattern %d", current_led_pattern);
 		switch (current_led_pattern) {
@@ -474,5 +959,11 @@ static void led_thread(void)
 			k_thread_suspend(led_thread_id);
 		}
 	}
-#endif
 }
+
+#else
+static void led_thread(void)
+{
+	LOG_WRN("LED GPIO does not exist");
+}
+#endif /* LED_TRI_COLOR */

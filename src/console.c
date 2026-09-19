@@ -1260,6 +1260,8 @@ static void print_help(void)
 	printk("Sensor Management:\n");
 	printk("  scan                       Restart sensor scan\n");
 	printk("  pwmclock [on|off|auto]      IMU 32.768kHz clock gate (status if no arg)\n");
+	printk("  ledmode [daily|debug]       LED 分配表：呼吸族(美观)/闪烁族(明确)\n");
+	printk("  ledbright [5-100]           LED 全局亮度%%（一改全改，重启保持）\n");
 	printk("  calibrate                  Calibrate sensor ZRO\n");
 #if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
 	printk("  6-side                     Calibrate 6-side accelerometer\n");
@@ -1571,6 +1573,41 @@ static void console_cmd_pwmclock(size_t argc, char **argv)
 	} else {
 		printk("Error: unknown argument '%s'. Use 'pwmclock [on|off|auto|status]'.\n", arg);
 	}
+}
+
+// LED 分配表切换：debug=闪烁族（明确）；daily=呼吸族（美观，默认）。无参显示当前模式。
+static void console_cmd_ledmode(size_t argc, char **argv)
+{
+	char *arg = argc > 1 ? argv[1] : NULL;
+	if (arg == NULL) {
+		printk("ledmode: %s（daily=呼吸族·美观 / debug=闪烁族·明确，重启保持）\n",
+		       get_led_mode() == LED_MODE_DEBUG ? "debug" : "daily");
+	} else if (strcmp(arg, "debug") == 0) {
+		set_led_mode(LED_MODE_DEBUG);
+		printk("ledmode: debug（闪烁族）已生效并持久化\n");
+	} else if (strcmp(arg, "daily") == 0) {
+		set_led_mode(LED_MODE_DAILY);
+		printk("ledmode: daily（呼吸族）已生效并持久化\n");
+	} else {
+		printk("Error: unknown argument '%s'. Use 'ledmode [daily|debug]'.\n", arg);
+	}
+}
+
+// LED 全局亮度（百分比 5-100，一改全改——所有灯/所有状态/两模式；重启保持）
+static void console_cmd_ledbright(size_t argc, char **argv)
+{
+	char *arg = argc > 1 ? argv[1] : NULL;
+	if (arg == NULL) {
+		printk("ledbright: %u%%（范围 5-100，全局生效，重启保持）\n", get_led_brightness());
+		return;
+	}
+	int v = atoi(arg);
+	if (v < 5 || v > 100) {
+		printk("Error: brightness out of range (5-100).\n");
+		return;
+	}
+	set_led_brightness((uint8_t)v);
+	printk("ledbright: %d%% 已生效并持久化\n", v);
 }
 
 static void console_cmd_calibrate(size_t argc, char **argv)
@@ -2200,6 +2237,8 @@ static const struct console_cmd console_cmds[] = {
 	{"battery", console_cmd_battery},
 	{"scan", console_cmd_scan},
 	{"pwmclock", console_cmd_pwmclock},
+	{"ledmode", console_cmd_ledmode},
+	{"ledbright", console_cmd_ledbright},
 	{"calibrate", console_cmd_calibrate},
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION
 	{"sens", console_cmd_sens},

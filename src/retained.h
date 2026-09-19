@@ -140,6 +140,10 @@ struct retained_data {
 		uint32_t total_wdt_resets;     // Cumulative WDT reset count (for debugging)
 		uint32_t magic;                // Magic number to validate watchdog state
 	} watchdog_state;
+
+	// LED 显示偏好（放 CRC 外：改动不失效校准数据；0xFF=未初始化）
+	uint8_t led_mode;   // 分配表：0=日常（呼吸族） 1=调试（闪烁族）
+	uint8_t led_bright; // 全局亮度百分比（5-100）
 };
 
 /* Magic number to validate watchdog state */
