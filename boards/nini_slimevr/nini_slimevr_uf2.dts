@@ -1,7 +1,7 @@
 // Copyright (c) 2024 Nordic Semiconductor ASA
 // SPDX-License-Identifier: Apache-2.0
 
-// 板级设备树：nini_slimevr_5883_uf2 ——【追踪器 tracker】（nRF52833 QDAA）
+// 板级设备树：nini_slimevr_uf2 ——【追踪器 tracker】（nRF52833 QDAA）
 // 由我们注入的 nini 板级文件（上游 jitingcn 仓不含）。
 // 与旧板 nini_slimevr_mag_uf2 的硬件差异：
 //   ① 三颗 LED 改为【共阴】接法（高电平点亮），新增红灯：
@@ -93,8 +93,8 @@
 
 
 / {
-	model = "nini_slimevr_5883_uf2";
-	compatible = "nini_slimevr_5883_uf2";
+	model = "nini_slimevr_uf2";
+	compatible = "nini_slimevr_uf2";
 
 	chosen {
 		zephyr,sram = &sram0;

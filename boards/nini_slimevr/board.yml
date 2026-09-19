@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 board:
-  name: nini_slimevr_5883_uf2
-  full_name: NiNi_Unicorn & MINGYUE Smol SlimeVR 5883
+  name: nini_slimevr_uf2
+  full_name: NiNi_Unicorn & MINGYUE Smol SlimeVR
   vendor: nini_slimevr
   socs:
     - name: nrf52833
