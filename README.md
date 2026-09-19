@@ -1,4 +1,4 @@
-# NiNi SlimeNRF tracker 固件
+# NiNi SlimeNRF Tracker 固件
 
 基于 SlimeNRF 生态的 nRF52833 全身追踪器固件。
 
