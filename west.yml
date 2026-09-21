@@ -6,5 +6,5 @@ manifest:
     - name: sdk-nrf
       path: nrf
       url: https://github.com/jitingcn/sdk-nrf.git
-      revision: ab62f8dfea4f8e8a9eacde53b2b763bd9854e743
+      revision: v3.4-branch
       import: true

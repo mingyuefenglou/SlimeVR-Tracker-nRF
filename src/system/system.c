@@ -733,13 +733,20 @@ static void button_thread(void)
 	/* Register button thread with watchdog */
 	watchdog_register_thread(WDT_CHANNEL_BUTTON, 0);
 
+	static bool hold_led_latched = false; // 按住反馈只点亮一次，避免每 20ms 重写 HIGHEST 槽
+					    // 把关机预告（FLASH）逐出——上板"2s 无预告"的根因
 	while (1) {
 		if (press_time && k_uptime_get() - press_time > 50) // debounce
 		{
 			if (!get_status(SYS_STATUS_BUTTON_PRESSED)) {
 				set_status(SYS_STATUS_BUTTON_PRESSED, true);
 			}
-			set_led(SYS_LED_PATTERN_ON, SYS_LED_PRIORITY_HIGHEST);
+			if (!hold_led_latched) {
+				hold_led_latched = true;
+				set_led(SYS_LED_PATTERN_ON, SYS_LED_PRIORITY_HIGHEST);
+			}
+		} else if (!press_time) {
+			hold_led_latched = false;
 		}
 		if (last_press_duration > 50) // debounce
 		{
@@ -767,6 +774,10 @@ static void button_thread(void)
 				if (test_mode_get()) {
 					LOG_INF("Button reboot blocked by test mode");
 				} else {
+					// 重启告别渐灭（与长按关机同款动画，体验一致；
+					// 动画 ~1.1s 后再提交重启）
+					set_led(SYS_LED_PATTERN_ONESHOT_POWEROFF, SYS_LED_PRIORITY_HIGHEST);
+					k_msleep(1350);
 					sys_request_system_reboot();
 				}
 			}

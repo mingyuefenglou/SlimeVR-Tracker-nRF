@@ -326,11 +326,12 @@ static uint32_t pattern_mask(enum sys_led_pattern p)
 	case SYS_LED_PATTERN_ERROR_D:
 		return CH_ALL; // 错误独占三灯 / 全局关
 	case SYS_LED_PATTERN_ON:
-	case SYS_LED_PATTERN_ONESHOT_POWERON:
 	case SYS_LED_PATTERN_ONESHOT_PING:
 	case SYS_LED_PATTERN_SHORT:
 	case SYS_LED_PATTERN_CONNECT_HEARTBEAT:
 		return CH_B; // 蓝=链路/即时反馈
+	case SYS_LED_PATTERN_ONESHOT_POWERON:
+		return CH_G; // 开机确认=绿（1.2s 常亮）
 	case SYS_LED_PATTERN_LONG:
 	case SYS_LED_PATTERN_FLASH:
 	case SYS_LED_PATTERN_ONESHOT_PROGRESS:
@@ -376,15 +377,15 @@ static uint32_t led_compute(enum led_ch ch, enum sys_led_pattern p, uint32_t *st
 		st = 100;
 		break;
 
-	case SYS_LED_PATTERN_ON:
-		v = daily ? 5000 : 10000;
+	case SYS_LED_PATTERN_ON: // 按住反馈（蓝在 1kΩ 下弱，80% 起步）
+		v = daily ? 8000 : 10000;
 		st = 200;
 		break;
 
 	case SYS_LED_PATTERN_ACTIVE_PERSIST: { // 绿·工作
 		if (daily) {
 			// 慢呼吸：10s 周期（2s 升+2s 降+6s 灭），峰 25%
-			v = breath_shape(now % 10000, 10000, 2000, 2000, 2500);
+			v = breath_shape(now % 10000, 10000, 2000, 2000, 6000);
 			st = 20;
 		} else {
 			v = (now % 10000) < 300 ? 10000 : 0; // 300ms blip/10s
@@ -396,7 +397,7 @@ static uint32_t led_compute(enum led_ch ch, enum sys_led_pattern p, uint32_t *st
 	case SYS_LED_PATTERN_CONNECT_HEARTBEAT: { // 蓝·链路心跳（与绿错峰 2.5s）
 		uint32_t phase = (now + 7500) % 10000; // 相位后移 2.5s → 两峰永不撞
 		if (daily) {
-			v = breath_shape(phase, 10000, 2500, 2500, 3000);
+			v = breath_shape(phase, 10000, 2500, 2500, 5000);
 			st = 20;
 		} else {
 			v = phase < 300 ? 10000 : 0;
@@ -409,9 +410,9 @@ static uint32_t led_compute(enum led_ch ch, enum sys_led_pattern p, uint32_t *st
 		if (daily) {
 			// 双短呼吸：4s 周期内两次 300ms 起伏（0 与 1.0s 处），峰 40%
 			uint32_t phase = now % 4000;
-			v = breath_shape(phase, 4000, 300, 300, 4000);
+			v = breath_shape(phase, 4000, 300, 300, 6000);
 			if (phase >= 1000 && phase < 1600) {
-				v = breath_shape(phase - 1000, 600, 300, 300, 4000);
+				v = breath_shape(phase - 1000, 600, 300, 300, 6000);
 			}
 			st = 20;
 		} else {
@@ -430,17 +431,11 @@ static uint32_t led_compute(enum led_ch ch, enum sys_led_pattern p, uint32_t *st
 		st = 40;
 		break;
 
-	case SYS_LED_PATTERN_ONESHOT_POWERON: { // 开机：日常=蓝渐亮一次；调试=3 连闪
+	case SYS_LED_PATTERN_ONESHOT_POWERON: { // 开机确认：日常=绿常亮 1.2s（顶格，绿在 1kΩ 下最弱）；调试=3 连闪
 		uint32_t i = (*state)++;
 		if (daily) {
-			if (i == 0) {
-				v = 0;
-				st = 100;
-			} else if (i <= 30) { // 600ms 升
-				v = 6000 * i / 30;
-				st = 20;
-			} else if (i <= 60) { // 600ms 降
-				v = 6000 * (60 - i) / 30;
+			if (i < 60) { // 60 步 × 20ms = 1.2s 常亮
+				v = 10000;
 				st = 20;
 			} else {
 				set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_HIGHEST);
@@ -461,7 +456,7 @@ static uint32_t led_compute(enum led_ch ch, enum sys_led_pattern p, uint32_t *st
 		uint32_t i = (*state)++;
 		if (i == 0) {
 			v = 0;
-			st = 250;
+			st = 100; // 100ms 全黑（原 250ms 易被误读为"先灭了一下"）
 		} else if (i <= 200) {
 			v = (201 - i) * 50; // 10000 → 0，每 5ms 一步
 			st = 5;
@@ -523,43 +518,43 @@ static uint32_t led_compute(enum led_ch ch, enum sys_led_pattern p, uint32_t *st
 		break;
 	}
 
-	case SYS_LED_PATTERN_ON_PERSIST: // 充满：绿浅常亮
-		v = daily ? 500 : 2000;
+	case SYS_LED_PATTERN_ON_PERSIST: // 充满：绿常亮（1kΩ 下绿弱，40% 起步）
+		v = daily ? 4000 : 6000;
 		st = 500;
 		break;
 
-	case SYS_LED_PATTERN_PULSE_PERSIST: { // 充电中：琥珀低亮度常亮直到充满
-		uint32_t mix = (ch == LED_CH_R) ? AMBER_RED_PPTT : AMBER_GREEN_PPTT;
+	case SYS_LED_PATTERN_PULSE_PERSIST: { // 充电中：琥珀常亮直到充满
+		// 1kΩ 限流电气推算：红峰值 1.1mA、绿仅 0.2mA——等观感须压红抬绿
+		uint32_t base = (ch == LED_CH_R) ? 1500 : 4500;
 		if (daily) {
-			// 15% 常亮 + ±5% 极微呼吸（3s 周期）防死板
 			uint32_t wob = breath_shape(now % 3000, 3000, 1500, 1500, 500);
-			v = mix * (1500 + wob) / 10000;
+			v = base + wob / 2; // ±~2.5% 微呼吸防死板
 			st = 40;
 		} else {
-			v = mix * 3000 / 10000; // 30% 常亮
+			v = (ch == LED_CH_R) ? 2000 : 5000;
 			st = 200;
 		}
 		break;
 	}
 
 	case SYS_LED_PATTERN_LONG_PERSIST: { // 低电：琥珀虚弱呼吸 / 双闪
-		uint32_t mix = (ch == LED_CH_R) ? AMBER_RED_PPTT : AMBER_GREEN_PPTT;
+		uint32_t peak = (ch == LED_CH_R) ? 800 : 2500;
 		if (daily) {
-			v = mix * breath_shape(now % 6000, 6000, 750, 750, 2000) / 10000;
+			v = breath_shape(now % 6000, 6000, 750, 750, peak);
 			st = 20;
 		} else {
 			uint32_t phase = now % 1050;
 			bool on = (phase < 150) || (phase >= 300 && phase < 450);
-			v = on ? mix * 2000 / 10000 : 0;
+			v = on ? peak : 0;
 			st = 30;
 		}
 		break;
 	}
 
 	case SYS_LED_PATTERN_DFU: { // OTA：琥珀流动快呼吸 / 快闪
-		uint32_t mix = (ch == LED_CH_R) ? 5500 : 4500;
+		uint32_t mix = (ch == LED_CH_R) ? 2500 : 7000;
 		if (daily) {
-			v = mix * breath_shape(now % 1200, 1200, 600, 600, 8200) / 10000;
+			v = mix * breath_shape(now % 1200, 1200, 600, 600, 10000) / 10000;
 			st = 15;
 		} else {
 			v = (now % 200) < 100 ? mix : 0;
@@ -573,7 +568,8 @@ static uint32_t led_compute(enum led_ch ch, enum sys_led_pattern p, uint32_t *st
 		if (prog > 10000) {
 			prog = 10000;
 		}
-		uint32_t base = (ch == LED_CH_R) ? (10000 - prog) : prog;
+		// 红电流效率是绿 4-5 倍——红分量减半防起步刺眼，绿满格保证进度可见
+		uint32_t base = (ch == LED_CH_R) ? (10000 - prog) / 2 : prog;
 		if (daily) {
 			uint32_t wob = breath_shape(now % 2000, 2000, 1000, 1000, 1000); // ±10% 微呼吸
 			v = base * (9000 + wob) / 10000;
@@ -592,7 +588,7 @@ static uint32_t led_compute(enum led_ch ch, enum sys_led_pattern p, uint32_t *st
 		if (daily) {
 			// 每 5s 一次红深呼吸（1.2s 起伏，峰 50%）——克制但绝不错过
 			if (ch == LED_CH_R) {
-				v = breath_shape(now % 5000, 5000, 600, 600, 5000);
+				v = breath_shape(now % 5000, 5000, 600, 600, 4000);
 			}
 			st = 20;
 		} else {
