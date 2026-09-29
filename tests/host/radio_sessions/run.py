@@ -110,7 +110,7 @@ with tempfile.TemporaryDirectory(prefix="tracker-radio-sessions-") as directory:
     temporary = Path(directory)
     (temporary / "connection").mkdir()
     (temporary / "connection/connection.h").write_text((SOURCE / "connection/connection.h").read_text())
-    for name, parts in (("payload", payload), ("commands", "\n\n".join(commands)), ("collection", "\n\n".join(collection)), ("recovery", recovery)):
+    for name, parts in (("payload", payload), ("commands", "\n\n".join(commands)), ("collection", "\n\n".join(collection)), ("recovery", recovery), ("lifecycle", function(connection, "connection_thread"))):
         (temporary / f"{name}.inc").write_text(parts)
     # Keep hardware leaves in the established fixture; exercise the new private
     # packet through the same extracted production ESB dispatch.
@@ -151,7 +151,7 @@ int main(void) {
     return 0;
 }
 ''')
-    for name in ("payload", "commands", "collection", "recovery"):
+    for name in ("payload", "commands", "collection", "recovery", "lifecycle"):
         if os.environ.get("RADIO_CASE") not in (None, name):
             continue
         binary = temporary / name

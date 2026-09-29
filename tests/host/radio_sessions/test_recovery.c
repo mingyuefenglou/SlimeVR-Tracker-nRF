@@ -17,6 +17,11 @@ static bool ping_pending, ping_failed, shutdown_requested;
 static uint32_t ping_failures, ping_success_streak;
 static int esb_conn_state;
 static int64_t connection_error_start_time;
+/* nini A0：链路活跃判据符号（PONG 受理段引用，替身环境提供） */
+static int64_t last_pong_ms;
+static int64_t k_uptime_get(void) { return 1000; }
+static bool esb_link_is_live(void) { return last_pong_ms != 0; }
+static void esb_restore_conn_led(void) {}
 
 /* Status publication is the hardware leaf; the getter and enum are real. */
 void set_status(enum sys_status status, bool set)

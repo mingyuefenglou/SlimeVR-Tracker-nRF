@@ -12,6 +12,8 @@
 #define SYS_STATUS_CONNECTION_ERROR 1
 #define SYS_STATUS_CALIBRATION_RUNNING 2
 #define TX_ERROR_THRESHOLD 10
+/* nini A0: 链路活跃判据符号（esb_thread 体内引用，替身环境需提供） */
+#define LINK_LIVE_MISS_THRESHOLD 3
 #define WDT_CHANNEL_ESB 1
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 #define LOG_DBG(...) ((void)0)
@@ -69,6 +71,7 @@ static void k_msleep(int ms)
 }
 static void clocks_request_start(int delay) {}
 static void clock_init_external_async(void) {}
+static void esb_restore_conn_led(void) {}
 static void esb_pair(void) { assert(false); }
 static void esb_initialize(bool init) {}
 static bool test_mode_get(void) { return false; }
