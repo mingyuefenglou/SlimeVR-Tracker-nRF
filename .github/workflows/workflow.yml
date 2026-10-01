@@ -7,6 +7,7 @@ on:
     branches:
       - main
       - dev
+      - NiNi_Slime_5883
     tags:
       - "*"
   workflow_dispatch:
