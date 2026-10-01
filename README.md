@@ -32,16 +32,16 @@
 
 ## SDK 与编译环境
 
-`west.yml` 选定 [jitingcn/sdk-nrf](https://github.com/jitingcn/sdk-nrf) `v3.4-branch`（跟随分支；基于官方 NCS v3.4.0）。
+`west.yml` 选定 [jitingcn/sdk-nrf](https://github.com/jitingcn/sdk-nrf) `v3.4-branch`（跟随分支；基于官方 NCS v3.4.1 LTS）。
 
 构建需要 **Zephyr SDK 1.0.1 GNU**（`zephyr/gnu`，GCC 14.3.0）与 **Python 3.12**；固件用 Picolibc，CI 在 Ubuntu 24.04 上跑。固件依赖该 SDK fork 的 ESB 扩展与 USB 修复，官方 NCS 不能直接替换。
 
 ```bash
 west init -l app
 west update
-export ZEPHYR\_SDK\_INSTALL\_DIR=/opt/zephyr-sdk-1.0.1
-west build -b nini\_slimevr\_5883\_uf2 -d build --sysbuild --pristine -s app -- \\
-  -DBOARD\_ROOT=$PWD/app
+export ZEPHYR_SDK_INSTALL_DIR=/opt/zephyr-sdk-1.0.1
+west build -b nini_slimevr_uf2 -d build --sysbuild --pristine -s app -- \
+  -DBOARD_ROOT=$PWD/app
 # 产物：build/app/zephyr/zephyr.uf2 / .hex / .elf
 ```
 
@@ -54,8 +54,14 @@ ledmode            # 查看当前模式
 ledmode debug      # 切到调试表（闪烁族：节拍分明，一眼锁定）
 ledmode daily      # 切回日常表（呼吸族：安静和谐，默认）
 ledbright          # 查看全局亮度
-ledbright 30       # 全局亮度 30%（5-100，一改全改，重启保持）
+ledbright 30       # 全局亮度 30%（0-100，0=全灭，一改全改，重启保持；默认 80%）
+ledmap             # 查看 LED 绑定：物理位 LED1/2/3 各是什么色
+ledmap LED1 R LED2 G LED3 B   # 全量指派（三位须为 R/G/B 各一次，重复直接拒绝——规避「全指向蓝」矛盾）
+ledmap LED1 R      # 单点=交换语义：LED1 与当前占 R 的位对调（永不产生重复）
+ledmap reset       # 回板默认 LED1=R LED2=G LED3=B（重启保持）
 ```
+
+**LED 绑定（`ledmap`）**：板载三个物理灯位 LED1/2/3（=dts `pwm-led0/1/2`），默认依次是红/绿/蓝。本板默认引脚映射：**红=P0.09、绿=P0.10、蓝=P0.20**（pwm1 通道 0/2/1）。换用不同色序的 LED 时无需重编固件，用 `ledmap` 改「语义色→物理位」的路由即可，重启保持。共阴 LED、GPIO 经 1kΩ 限流，红色峰值电流约为绿/蓝的 4-5 倍，固件已在各灯效里做了等观感补偿；全局亮度用 `ledbright` 调。
 
 ### 日常表（呼吸族·默认）
 
@@ -93,7 +99,7 @@ ledbright 30       # 全局亮度 30%（5-100，一改全改，重启保持）
 
 Receiver 侧差异：绿=在岗呼吸（10s）；蓝=通讯域——已连心跳呼吸（日常表峰值随已连台数 1-10 台从 25%→55% 渐满，调试表连跳次数=台数）；配对模式蓝双短呼吸；新 tracker 入网绿渐亮确认。
 
-Bootloader：蓝=三态（3s 柔呼吸等待 U 盘 / 60% 常亮就绪 / 5Hz 快闪写入中）；红/绿不参与。
+Bootloader：**红常亮**（~50%）=已上电未与电脑通讯（充电器/纯供电/枚举前）；**绿常亮**（60%）=已建立通讯（OS 认卷/数据活动）；**蓝快闪**（2.5Hz，200/200ms，清晰可辨）=固件写入中；写完**绿常亮 1s** 后自动进 APP。BLE OTA：已连接=绿、广播中=红。
 
 ## 许可
 
