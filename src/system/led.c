@@ -839,6 +839,23 @@ uint8_t get_led_brightness(void)
 	return led_brightness_pptt_legacy / 100;
 }
 
+/* LED 绑定仅三通道板实现；传统板提供桩（console 可链接、查询回 R/G/B、指派拒绝不生效） */
+bool set_led_binding(const uint8_t phys_colors[3])
+{
+	ARG_UNUSED(phys_colors);
+	return false; // 非三通道板无绑定可改
+}
+
+void get_led_binding(uint8_t phys_colors[3])
+{
+	static const uint8_t identity[3] = {0, 1, 2}; // R G B
+	memcpy(phys_colors, identity, 3);
+}
+
+void reset_led_binding(void)
+{
+}
+
 void set_led(enum sys_led_pattern led_pattern, int priority)
 {
 	LOG_DBG("set_led: current_led_pattern %d, current_priority %d", current_led_pattern, current_priority);
