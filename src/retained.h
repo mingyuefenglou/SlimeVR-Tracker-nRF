@@ -143,7 +143,8 @@ struct retained_data {
 
 	// LED 显示偏好（放 CRC 外：改动不失效校准数据；0xFF=未初始化）
 	uint8_t led_mode;   // 分配表：0=日常（呼吸族） 1=调试（闪烁族）
-	uint8_t led_bright; // 全局亮度百分比（5-100）
+	uint8_t led_bright; // 全局亮度百分比（0-100）
+	uint8_t led_bind[3]; // 物理位 LED1/2/3 各是什么色（0=R 1=G 2=B，须为排列）
 };
 
 /* Magic number to validate watchdog state */

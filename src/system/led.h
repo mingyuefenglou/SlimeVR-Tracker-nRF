@@ -1,6 +1,9 @@
 #ifndef SLIMENRF_SYSTEM_LED
 #define SLIMENRF_SYSTEM_LED
 
+#include <stdbool.h>
+#include <stdint.h>
+
 /*
 LED priorities (0 is highest)
 0: boot/power
@@ -86,8 +89,16 @@ void set_led(enum sys_led_pattern led_pattern, int priority);
 // 模式与全局亮度（三通道板；持久化于 retained）
 void set_led_mode(enum led_display_mode mode);
 enum led_display_mode get_led_mode(void);
-void set_led_brightness(uint8_t percent); // 5-100，全局乘数（一改全改）
+void set_led_brightness(uint8_t percent); // 0-100，全局乘数（一改全改；0=全灭）
 uint8_t get_led_brightness(void);
+
+/* LED 绑定（三通道板；持久化于 retained）：物理位 LED1/2/3（=dts pwm-led0/1/2）
+ * 上各是什么语义色。color 值：0=R 1=G 2=B。
+ * set 要求三值为 R/G/B 的排列（重复/越界拒绝并返回 false）——
+ * 规避「三个位全指蓝」这类矛盾配置。 */
+bool set_led_binding(const uint8_t phys_colors[3]);
+void get_led_binding(uint8_t phys_colors[3]);
+void reset_led_binding(void);
 
 // 磁校准进度（0-10000；校准线程写、LED 线程读）
 extern volatile uint16_t led_cal_progress;

@@ -307,7 +307,32 @@ struct led_channel {
 
 static struct led_channel chans[LED_CH_COUNT];
 static enum led_display_mode led_mode = LED_MODE_DAILY;
-static uint16_t led_brightness_pptt = 10000; // 全局亮度乘数（一改全改）
+static uint16_t led_brightness_pptt = 8000; // 全局亮度乘数（默认 80%，ledbright 0-100 可调）
+
+/* LED 绑定表：物理位 LED1/2/3（=dts pwm-led0/1/2）上各是什么语义色（0=R 1=G 2=B）。
+ * 默认恒等（pwm-led0=红/1=绿/2=蓝，与 dts 色序约定一致）。
+ * ledmap 命令改写并持久化（retained CRC 外）——换灯/色序不同免重编。 */
+static uint8_t led_phys_color[LED_CH_COUNT] = {LED_CH_R, LED_CH_G, LED_CH_B};
+
+// 语义通道 → 物理位（led_channels_apply 路由用；表中必为排列，查找必命中）
+static uint8_t bind_of_semantic(enum led_ch sem)
+{
+	for (uint8_t i = 0; i < LED_CH_COUNT; i++) {
+		if (led_phys_color[i] == (uint8_t)sem) {
+			return i;
+		}
+	}
+	return (uint8_t)sem; // 防御：表损坏时回恒等
+}
+
+// 物理位 → PWM 设备（与 dts pwm-led0/1/2 一一对应）
+static const struct pwm_dt_spec *const led_pwms[LED_CH_COUNT] = {&pwm_led, &pwm_led1, &pwm_led2};
+
+/* 全暗睡眠信号量（丢唤醒竞态修复）：旧实现「外部线程 suspend→resume→wakeup +
+ * led 线程自 suspend」存在唤醒丢失窗口——led 线程算出全暗准备挂起的瞬间被
+ * 唤醒，恢复后继续走挂起路径 → LED 全黑卡死直到下次 set_led（"莫名好了"）。
+ * 计数信号量无此窗口：give 在线程 take 之前也会计数，线程随后立即通过。 */
+static K_SEM_DEFINE(led_wake_sem, 0, 1);
 
 // 琥珀分量（充电/低电/OTA 的红绿混色比）
 #define AMBER_RED_PPTT 6000
@@ -361,6 +386,9 @@ static uint32_t breath_shape(uint32_t phase, uint32_t period, uint32_t up, uint3
 	}
 	return 0;
 }
+
+// oneshot 完成自清理（定义在 led_thread 旁；led_compute 内使用，前置声明）
+static void led_oneshot_done(enum sys_led_pattern done);
 
 // 计算某通道在 pattern 下的输出（0-10000 pptt）与建议刷新步距
 static uint32_t led_compute(enum led_ch ch, enum sys_led_pattern p, uint32_t *state, uint32_t *step_ms)
@@ -432,20 +460,24 @@ static uint32_t led_compute(enum led_ch ch, enum sys_led_pattern p, uint32_t *st
 		break;
 
 	case SYS_LED_PATTERN_ONESHOT_POWERON: { // 开机确认：日常=绿常亮 1.2s（顶格，绿在 1kΩ 下最弱）；调试=3 连闪
-		uint32_t i = (*state)++;
+		// 按经过时间判定（旧实现按步数：步距被其他通道拉小时平顶会缩水，如 DFU 15ms → 0.9s）
+		if (*state == 0) {
+			*state = now + 1; // 存"起始+1"（0 保留作未开始标记；+1 使同 tick elapsed=0）
+		}
+		uint32_t elapsed = (now + 1) - *state;
 		if (daily) {
-			if (i < 60) { // 60 步 × 20ms = 1.2s 常亮
+			if (elapsed < 1200) {
 				v = 10000;
 				st = 20;
 			} else {
-				set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_HIGHEST);
+				led_oneshot_done(p);
 				v = 0;
 				st = 100;
 			}
 		} else {
-			v = !(i % 2) * 10000;
-			if (i == 7) {
-				set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_HIGHEST);
+			v = ((elapsed / 200) % 2) ? 0 : 10000; // 200ms 方波 3 连闪
+			if (elapsed >= 1400) {
+				led_oneshot_done(p);
 			}
 			st = 200;
 		}
@@ -475,13 +507,13 @@ static uint32_t led_compute(enum led_ch ch, enum sys_led_pattern p, uint32_t *st
 				v = (i <= 30) ? 7000 * i / 30 : 7000 * (60 - i) / 30;
 				st = 20;
 			} else {
-				set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_HIGHEST);
+				led_oneshot_done(p);
 				st = 100;
 			}
 		} else {
 			v = !(i % 2) * 10000;
 			if (i == 5) {
-				set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_HIGHEST);
+				led_oneshot_done(p);
 			}
 			st = 200;
 		}
@@ -495,13 +527,13 @@ static uint32_t led_compute(enum led_ch ch, enum sys_led_pattern p, uint32_t *st
 				v = (i <= 30) ? 10000 * i / 30 : 10000 * (60 - i) / 30;
 				st = 20;
 			} else {
-				set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_HIGHEST);
+				led_oneshot_done(p);
 				st = 100;
 			}
 		} else {
 			v = !(i % 2) * 10000;
 			if (i == 9) {
-				set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_HIGHEST);
+				led_oneshot_done(p);
 			}
 			st = 200;
 		}
@@ -512,7 +544,7 @@ static uint32_t led_compute(enum led_ch ch, enum sys_led_pattern p, uint32_t *st
 		uint32_t i = (*state)++;
 		v = (i % 2) * 10000;
 		if (i == 20) {
-			set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_HIGHEST);
+			led_oneshot_done(p);
 		}
 		st = 200;
 		break;
@@ -625,37 +657,38 @@ static enum sys_led_pattern resolve_channel(enum led_ch ch)
 	return SYS_LED_PATTERN_OFF;
 }
 
-// 渐灭需要把 value 转 PWM 占空（含全局亮度乘数）
+// 渐灭需要把 value 转 PWM 占空（含全局亮度乘数）；按绑定表路由到物理位
 static void led_channels_apply(void)
 {
 	const uint32_t br = led_brightness_pptt;
-	uint32_t vr = chans[LED_CH_R].last_value * br / 10000;
-	uint32_t vg = chans[LED_CH_G].last_value * br / 10000;
-	uint32_t vb = chans[LED_CH_B].last_value * br / 10000;
-	if (vr > 10000) {
-		vr = 10000;
+	for (int sem = 0; sem < LED_CH_COUNT; sem++) {
+		uint32_t v = chans[sem].last_value * br / 10000;
+		if (v > 10000) {
+			v = 10000;
+		}
+		uint8_t phys = bind_of_semantic((enum led_ch)sem);
+		if (phys >= LED_CH_COUNT) {
+			phys = sem; // 防御：绑定表损坏时回恒等
+		}
+		const struct pwm_dt_spec *spec = led_pwms[phys];
+		pwm_set_pulse_dt(spec, spec->period / 10000 * v);
 	}
-	if (vg > 10000) {
-		vg = 10000;
-	}
-	if (vb > 10000) {
-		vb = 10000;
-	}
-	pwm_set_pulse_dt(&pwm_led, pwm_led.period / 10000 * vr);
-	pwm_set_pulse_dt(&pwm_led1, pwm_led1.period / 10000 * vg);
-	pwm_set_pulse_dt(&pwm_led2, pwm_led2.period / 10000 * vb);
 }
 
 static bool led_any_on;
 
 static void led_thread(void)
 {
-	// 开机从 retained 恢复显示偏好（0xFF=未初始化 → 默认日常/100%）
+	// 开机从 retained 恢复显示偏好（0xFF=未初始化 → 默认日常/80%/恒等绑定）
 	if (retained->led_mode == (uint8_t)LED_MODE_DEBUG) {
 		led_mode = LED_MODE_DEBUG;
 	}
-	if (retained->led_bright >= 5 && retained->led_bright <= 100) {
+	if (retained->led_bright <= 100) { // 0-100 皆合法（0=全灭）；0xFF 未初始化不落此分支
 		led_brightness_pptt = retained->led_bright * 100;
+	}
+	if (retained->led_bind[0] <= LED_CH_B && retained->led_bind[1] <= LED_CH_B &&
+	    retained->led_bind[2] <= LED_CH_B) {
+		memcpy(led_phys_color, retained->led_bind, LED_CH_COUNT);
 	}
 	led_resume(); // 进线程即确保 PWM 设备 ACTIVE（命脉）
 	while (1) {
@@ -681,59 +714,40 @@ static void led_thread(void)
 		led_any_on = on;
 		if (!on) {
 			led_suspend();
-			k_thread_suspend(led_thread_id);
-			// 唤醒由 set_led 负责（含 led_resume 命脉）
+			k_sem_take(&led_wake_sem, K_FOREVER); // 全暗睡眠：计数信号量，无丢唤醒
+			led_resume(); // 命脉：唤醒后 PWM 必须回 ACTIVE
+			continue;     // 醒来重新评估（含伪唤醒——give 先于 take 的计数场景）
 		}
 		k_msleep(min_step);
 	}
 }
 
+// oneshot 完成自清理（只清承载该 pattern 的槽——旧实现 HIGHEST 全清会误伤
+// 其他在播 oneshot，如 PING 与校准/配对反馈并发时后者被一起抹掉）
+static void led_oneshot_done(enum sys_led_pattern done)
+{
+	for (int prio = 0; prio < SYS_LED_PATTERN_DEPTH; prio++) {
+		if (led_patterns[prio] == done) {
+			led_patterns[prio] = SYS_LED_PATTERN_OFF;
+		}
+	}
+}
+
 void set_led(enum sys_led_pattern led_pattern, int priority)
 {
-	if (k_current_get() == led_thread_id && led_pattern <= SYS_LED_PATTERN_OFF) {
-		// 线程自清理：清掉承载当前 oneshot 的槽（ONESHOT 完成回 OFF）
+	if (k_current_get() == led_thread_id && led_pattern == SYS_LED_PATTERN_OFF_FORCE) {
+		// OFF_FORCE 语义：压制一切（清所有槽并写进槽 0）
 		for (int prio = 0; prio < SYS_LED_PATTERN_DEPTH; prio++) {
-			if (led_patterns[prio] >= SYS_LED_PATTERN_ONESHOT_POWERON &&
-			    led_patterns[prio] <= SYS_LED_PATTERN_ONESHOT_PING) {
-				led_patterns[prio] = SYS_LED_PATTERN_OFF;
-			}
+			led_patterns[prio] = SYS_LED_PATTERN_OFF;
 		}
-		if (led_pattern == SYS_LED_PATTERN_OFF_FORCE) {
-			// OFF_FORCE 语义：压制一切（写进所请求槽并清其余）
-			for (int prio = 0; prio < SYS_LED_PATTERN_DEPTH; prio++) {
-				led_patterns[prio] = SYS_LED_PATTERN_OFF;
-			}
-			led_patterns[priority == SYS_LED_PRIORITY_HIGHEST ? 0 : priority] = led_pattern;
-		}
+		led_patterns[SYS_LED_PRIORITY_HIGHEST] = led_pattern;
 	} else {
 		led_patterns[priority] = led_pattern;
 	}
 
-	bool any = false;
-	for (int ch = 0; ch < LED_CH_COUNT; ch++) {
-		if (resolve_channel(ch) > SYS_LED_PATTERN_OFF) {
-			any = true;
-			break;
-		}
-	}
-
-	if (!any) {
-		if (led_any_on) {
-			led_any_on = false;
-			led_suspend();
-			k_thread_suspend(led_thread_id);
-		}
-		return;
-	}
-
 	if (k_current_get() != led_thread_id) {
-		k_thread_suspend(led_thread_id);
-		led_resume(); // 命脉：非暗态必须走完整 resume（pm RESUME + pin init）
-		k_thread_resume(led_thread_id);
-		k_wakeup(led_thread_id);
-	} else {
-		led_resume();
-		k_thread_resume(led_thread_id);
+		k_sem_give(&led_wake_sem);   // 唤醒全暗睡眠（计数信号量无丢唤醒；伪唤醒无害）
+		k_wakeup(led_thread_id);     // 打断渲染步距睡眠，尽快响应新 pattern
 	}
 }
 
@@ -751,13 +765,10 @@ enum led_display_mode get_led_mode(void)
 
 void set_led_brightness(uint8_t percent)
 {
-	if (percent < 5) {
-		percent = 5;
-	}
 	if (percent > 100) {
 		percent = 100;
 	}
-	led_brightness_pptt = percent * 100;
+	led_brightness_pptt = percent * 100; // 0-100（0=全灭可用）
 	retained->led_bright = percent;
 	retained_update();
 }
@@ -765,6 +776,34 @@ void set_led_brightness(uint8_t percent)
 uint8_t get_led_brightness(void)
 {
 	return led_brightness_pptt / 100;
+}
+
+/* LED 绑定：phys_colors[3] = 物理位 LED1/2/3 上各是什么色（0=R 1=G 2=B），
+ * 必须是 R/G/B 的排列（调用方校验，此处防御再查一次） */
+bool set_led_binding(const uint8_t phys_colors[LED_CH_COUNT])
+{
+	bool seen[LED_CH_COUNT] = {false, false, false};
+	for (int i = 0; i < LED_CH_COUNT; i++) {
+		if (phys_colors[i] >= LED_CH_COUNT || seen[phys_colors[i]]) {
+			return false; // 越界或重复（如三个位全指蓝）→ 拒绝
+		}
+		seen[phys_colors[i]] = true;
+	}
+	memcpy(led_phys_color, phys_colors, LED_CH_COUNT);
+	memcpy(retained->led_bind, phys_colors, LED_CH_COUNT);
+	retained_update();
+	return true;
+}
+
+void get_led_binding(uint8_t phys_colors[LED_CH_COUNT])
+{
+	memcpy(phys_colors, led_phys_color, LED_CH_COUNT);
+}
+
+void reset_led_binding(void)
+{
+	static const uint8_t identity[LED_CH_COUNT] = {LED_CH_R, LED_CH_G, LED_CH_B};
+	set_led_binding(identity);
 }
 
 /* ==== 传统单仲裁路径（非三色板：行为与上游一致） ==== */

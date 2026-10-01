@@ -1261,7 +1261,8 @@ static void print_help(void)
 	printk("  scan                       Restart sensor scan\n");
 	printk("  pwmclock [on|off|auto]      IMU 32.768kHz clock gate (status if no arg)\n");
 	printk("  ledmode [daily|debug]       LED 分配表：呼吸族(美观)/闪烁族(明确)\n");
-	printk("  ledbright [5-100]           LED 全局亮度%%（一改全改，重启保持）\n");
+	printk("  ledbright [0-100]           LED 全局亮度%%（一改全改，0=全灭，重启保持）\n");
+	printk("  ledmap [LEDx R|G|B ...]     LED 绑定：物理位 LED1/2/3 各是什么色（reset 回默认）\n");
 	printk("  calibrate                  Calibrate sensor ZRO\n");
 #if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
 	printk("  6-side                     Calibrate 6-side accelerometer\n");
@@ -1593,21 +1594,105 @@ static void console_cmd_ledmode(size_t argc, char **argv)
 	}
 }
 
-// LED 全局亮度（百分比 5-100，一改全改——所有灯/所有状态/两模式；重启保持）
+// LED 全局亮度（百分比 0-100，0=全灭，一改全改——所有灯/所有状态/两模式；重启保持）
 static void console_cmd_ledbright(size_t argc, char **argv)
 {
 	char *arg = argc > 1 ? argv[1] : NULL;
 	if (arg == NULL) {
-		printk("ledbright: %u%%（范围 5-100，全局生效，重启保持）\n", get_led_brightness());
+		printk("ledbright: %u%%（范围 0-100，全局生效，重启保持）\n", get_led_brightness());
 		return;
 	}
 	int v = atoi(arg);
-	if (v < 5 || v > 100) {
-		printk("Error: brightness out of range (5-100).\n");
+	if (v < 0 || v > 100) {
+		printk("Error: brightness out of range (0-100).\n");
 		return;
 	}
 	set_led_brightness((uint8_t)v);
 	printk("ledbright: %d%% 已生效并持久化\n", v);
+}
+
+/* LED 绑定：物理位 LED1/2/3（=dts pwm-led0/1/2）各是什么色——换灯/色序不同免重编，重启保持。
+ * 无参显示当前；'ledmap LED1 R LED2 G LED3 B' 全量指派（三位的色必须是 R/G/B 各一次，
+ * 重复直接拒绝——规避「全指向蓝」矛盾）；'ledmap LED1 R' 单点=交换语义（LED1 与当前
+ * 占 R 的位对调色，永不产生重复）；'ledmap reset' 回板默认（LED1=R LED2=G LED3=B）。 */
+static void console_cmd_ledmap(size_t argc, char **argv)
+{
+	static const char color_names[3] = {'R', 'G', 'B'};
+
+	if (argc == 1) {
+		uint8_t cur[3];
+		get_led_binding(cur);
+		printk("ledmap: LED1=%c LED2=%c LED3=%c（物理位→色；ledmap [LEDx R|G|B ...] 改，reset 回默认）\n",
+		       color_names[cur[0]], color_names[cur[1]], color_names[cur[2]]);
+		return;
+	}
+	if (strcmp(argv[1], "reset") == 0) {
+		reset_led_binding();
+		printk("ledmap: 已回板默认 LED1=R LED2=G LED3=B 并持久化\n");
+		return;
+	}
+
+	size_t pairs = (argc - 1) / 2;
+	if ((argc - 1) % 2 != 0 || pairs < 1 || pairs > 3) {
+		printk("Error: 参数须成对：ledmap [LED1 R] [LED2 G] [LED3 B]，或 ledmap reset\n");
+		return;
+	}
+	int pp[3], cc[3];
+	for (size_t i = 0; i < pairs; i++) {
+		const char *pos = argv[1 + i * 2];
+		const char *col = argv[2 + i * 2];
+		pp[i] = (strcmp(pos, "led1") == 0) ? 0 :
+		        (strcmp(pos, "led2") == 0) ? 1 :
+		        (strcmp(pos, "led3") == 0) ? 2 : -1;
+		cc[i] = (strlen(col) == 1 && col[0] == 'r') ? 0 :
+		        (strlen(col) == 1 && col[0] == 'g') ? 1 :
+		        (strlen(col) == 1 && col[0] == 'b') ? 2 : -1;
+		if (pp[i] < 0 || cc[i] < 0) {
+			printk("Error: 无法识别 '%s %s'——位须为 LED1/LED2/LED3，色须为 R/G/B\n", pos, col);
+			return;
+		}
+		for (size_t j = 0; j < i; j++) {
+			if (pp[j] == pp[i]) {
+				printk("Error: LED%d 被重复指定\n", pp[i] + 1);
+				return;
+			}
+		}
+	}
+
+	uint8_t next[3];
+	get_led_binding(next);
+	if (pairs == 3) {
+		// 全量指派：严格校验为 R/G/B 排列（不允许重复/缺色）
+		for (size_t i = 0; i < 3; i++) {
+			next[pp[i]] = (uint8_t)cc[i];
+		}
+		if (!set_led_binding(next)) {
+			printk("Error: 三位的色必须是 R/G/B 各一次（不允许重复/缺色）\n");
+			return;
+		}
+	} else {
+		// 单点/两对=交换语义：被点名位与「当前占目标色的位」对调（天然不产生重复）
+		for (size_t i = 0; i < pairs; i++) {
+			int p = pp[i];
+			uint8_t want = (uint8_t)cc[i];
+			if (next[p] == want) {
+				continue; // 已是目标色
+			}
+			for (int holder = 0; holder < 3; holder++) {
+				if (next[holder] == want) {
+					next[holder] = next[p];
+					next[p] = want;
+					break;
+				}
+			}
+		}
+		if (!set_led_binding(next)) { // 交换必为排列，理论不失败
+			printk("Error: 绑定结果非法\n");
+			return;
+		}
+	}
+	printk("ledmap: LED1=%c LED2=%c LED3=%c 已生效并持久化\n",
+	       color_names[next[0]], color_names[next[1]], color_names[next[2]]);
 }
 
 static void console_cmd_calibrate(size_t argc, char **argv)
@@ -2239,6 +2324,7 @@ static const struct console_cmd console_cmds[] = {
 	{"pwmclock", console_cmd_pwmclock},
 	{"ledmode", console_cmd_ledmode},
 	{"ledbright", console_cmd_ledbright},
+	{"ledmap", console_cmd_ledmap},
 	{"calibrate", console_cmd_calibrate},
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION
 	{"sens", console_cmd_sens},
