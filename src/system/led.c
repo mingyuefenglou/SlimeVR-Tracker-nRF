@@ -310,7 +310,7 @@ struct led_channel {
 
 static struct led_channel chans[LED_CH_COUNT];
 static enum led_display_mode led_mode = LED_MODE_DAILY;
-static uint16_t led_brightness_pptt = 2000; // 全局亮度乘数（默认 20%，ledbright 0-100 可调；呼吸图案峰=满刻度，此值即峰顶占空）
+static uint16_t led_brightness_pptt = 2500; // 全局亮度乘数=全域最大亮度（默认 25%，ledbright 0-100 可调；所有灯效受它缩放，此值即峰顶占空）
 
 /* LED 绑定表：物理位 LED1/2/3（=dts pwm-led0/1/2）上各是什么语义色（0=R 1=G 2=B）。
  * 默认恒等（pwm-led0=红/1=绿/2=蓝，与 dts 色序约定一致）。
@@ -423,8 +423,8 @@ static uint32_t led_compute(enum led_ch ch, enum sys_led_pattern p, uint32_t *st
 
 	case SYS_LED_PATTERN_ACTIVE_PERSIST: { // 绿·工作
 		if (daily) {
-			// 30s 墙钟栅格 swell：1.2s 升+1.2s 降 @0s，峰=满刻度（ledbright 定标基准）
-			v = breath_shape(now % 30000, 30000, 1200, 1200, 10000);
+			// 20s 墙钟栅格起伏：1.2s 升+1.2s 降 @0s，峰=满刻度（ledbright 定标基准）
+			v = breath_shape(now % 20000, 20000, 1200, 1200, 10000);
 			st = 20;
 		} else {
 			v = (now % 10000) < 300 ? 10000 : 0; // 300ms blip/10s
@@ -433,10 +433,10 @@ static uint32_t led_compute(enum led_ch ch, enum sys_led_pattern p, uint32_t *st
 		break;
 	}
 
-	case SYS_LED_PATTERN_CONNECT_HEARTBEAT: { // 蓝·链路心跳（30s 栅格 @15s 反相，与绿 swell 永不错峰重叠）
-		uint32_t phase = (now + 15000) % 30000; // 相位后移 15s → 与绿 swell 互为反相
+	case SYS_LED_PATTERN_CONNECT_HEARTBEAT: { // 蓝·链路心跳（20s 栅格 @10s 反相，与绿起伏永不错峰重叠）
+		uint32_t phase = (now + 10000) % 20000; // 相位后移 10s → 与绿起伏互为反相
 		if (daily) {
-			v = breath_shape(phase, 30000, 1200, 1200, 5000);
+			v = breath_shape(phase, 20000, 1200, 1200, 5000);
 			st = 20;
 		} else {
 			v = phase < 300 ? 10000 : 0;
@@ -447,12 +447,12 @@ static uint32_t led_compute(enum led_ch ch, enum sys_led_pattern p, uint32_t *st
 
 	case SYS_LED_PATTERN_SHORT: { // 蓝·未配对/搜台
 		if (daily) {
-			// 30s 栅格双 swell @10s 与 @20s（各 1.2s 升+1.2s 降，峰 60%）——与绿 @0s 等距 10s 交替
-			uint32_t phase = now % 30000;
+			// 20s 栅格双击心跳：@10s 与 @13s 各一次 1.2s 起伏（中隔 0.6s 暗 =「定-定」双击感）
+			uint32_t phase = now % 20000;
 			if (phase >= 10000 && phase < 12400) {
-				v = breath_shape(phase - 10000, 2400, 1200, 1200, 6000);
-			} else if (phase >= 20000 && phase < 22400) {
-				v = breath_shape(phase - 20000, 2400, 1200, 1200, 6000);
+				v = breath_shape(phase - 10000, 2400, 1200, 1200, 5000);
+			} else if (phase >= 13000 && phase < 15400) {
+				v = breath_shape(phase - 13000, 2400, 1200, 1200, 5000);
 			}
 			st = 20;
 		} else {

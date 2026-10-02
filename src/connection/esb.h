@@ -80,6 +80,8 @@ void esb_set_pair(uint64_t addr);
 void esb_pair(void);
 void esb_reset_pair(void);
 void esb_clear_pair(void);
+/* 恢复链路域 LED 静息态：已配对=心跳，未配对=搜台双击（OTA 会话中不覆盖） */
+void esb_restore_conn_led(void);
 
 void esb_process_ota_rx_queue(void);
 int esb_write(uint8_t *data, bool no_ack, size_t data_length);

@@ -1192,6 +1192,7 @@ void event_handler(struct esb_evt const *event)
 							connection_error_start_time = 0;
 							shutdown_requested = false;
 							ping_success_streak = 0;
+							esb_restore_conn_led(); // 根因②：错误消除后蓝灯回静息态
 						}
 						break;
 					}
@@ -1213,6 +1214,7 @@ void event_handler(struct esb_evt const *event)
 							connection_error_start_time = 0;
 							shutdown_requested = false;
 							ping_success_streak = 0;
+							esb_restore_conn_led(); // 根因②：错误消除后蓝灯回静息态
 						}
 					} else {
 						ping_success_streak = 0;
@@ -1751,6 +1753,19 @@ void esb_set_pair(uint64_t addr)
 			  sizeof(paired_addr)); // Write new address and tracker id
 }
 
+/* 恢复链路域 LED 静息态：已配对=心跳，未配对=搜台双击。
+ * 三个历史根因造成槽 2 永久 OFF（蓝灯再也不亮）：① 已配对重启后 CONNECT_HEARTBEAT
+ * 从不设置（唯一 set 点在首配分支内）；② 连接错误清除处无人重设；③ OTA 结束边沿写裸 OFF。
+ * 三个恢复点（esb_pair 尾 / PONG 恢复 ×2 / OTA 结束边沿）统一调本函数。 */
+void esb_restore_conn_led(void)
+{
+	if (esb_ota_is_active()) {
+		return; // OTA 会话拥有蓝通道，勿覆盖 DFU 快呼吸
+	}
+	set_led(paired_addr[0] ? SYS_LED_PATTERN_CONNECT_HEARTBEAT : SYS_LED_PATTERN_SHORT,
+		SYS_LED_PRIORITY_CONNECTION);
+}
+
 void esb_pair(void)
 {
 	// Reset ping state when starting pairing
@@ -1848,6 +1863,7 @@ void esb_pair(void)
 
 	esb_set_addr_paired();
 	esb_conn_state = ESB_ST_PAIRED;
+	esb_restore_conn_led(); // 主因①：已配对重启也经此恢复心跳（首配分支之外的唯一路径）
 	clocks_stop();
 }
 

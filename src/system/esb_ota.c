@@ -836,8 +836,11 @@ static void ota_update_led(void)
 		return;
 	}
 	led_active = active;
-	set_led(active ? SYS_LED_PATTERN_DFU : SYS_LED_PATTERN_OFF,
-		SYS_LED_PRIORITY_CONNECTION);
+	if (active) {
+		set_led(SYS_LED_PATTERN_DFU, SYS_LED_PRIORITY_CONNECTION);
+	} else {
+		esb_restore_conn_led(); // 根因③：OTA 结束回心跳/搜台（替代裸 OFF，不再永久灭蓝）
+	}
 }
 
 static void ota_send_status(void)
