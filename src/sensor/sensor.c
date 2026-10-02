@@ -154,6 +154,9 @@ static int force_scan_request_count = 0;
  * EMA. Time constant ~120 ms at 416 Hz (alpha = 0.02/sample). */
 #define REST_GYRO_SPEED_EMA_ALPHA 0.02f
 static float rest_gyro_speed_ema[3];
+/* 最近一次"有意义运动"（sensor_motion_is_active 为真）的时刻，-1=尚无采样。
+ * 供 LED 静止暗化（静止 3 分钟减半）消费；睡眠/无 IMU 时不更新 → 自然保持暗化。 */
+static int64_t sensor_last_active_ms = -1;
 /* Magnetometer reads share one deadline regardless of the selected bus backend. */
 static int64_t mag_read_period_ticks = 1;
 static int64_t next_mag_read_ticks;
@@ -578,6 +581,7 @@ static bool sensor_update_resting_state(
 		rest_state.quiet_since_ms = 0;
 		rest_state.motion_since_ms = 0;
 		rest_state.initialized = true;
+		sensor_last_active_ms = now_ms; // 首采样视为刚活动（开机不暗化）
 		*gyro_speed_out = 0.0f;
 		*lin_accel_out = 0.0f;
 		return false;
@@ -594,6 +598,9 @@ static bool sensor_update_resting_state(
 	const float *fusion_deviations = fusion_rest.available ? fusion_rest.deviations : NULL;
 	bool quiet = sensor_motion_is_quiet(gyro_speed, lin_accel, quat_delta, fusion_rest.detected, fusion_deviations);
 	bool active = sensor_motion_is_active(gyro_speed, lin_accel, quat_delta, fusion_deviations);
+	if (active) {
+		sensor_last_active_ms = now_ms; // LED 静止暗化的"活动"时钟
+	}
 	*gyro_speed_out = gyro_speed;
 	*lin_accel_out = lin_accel;
 
@@ -631,6 +638,17 @@ static bool sensor_update_resting_state(
 	}
 
 	return rest_state.resting;
+}
+
+/* 距最近一次"有意义运动"的毫秒数（LED 静止暗化消费）。
+ * 无采样构型（sensor_last_active_ms<0，如无 IMU）返回 0=视为刚活动 → 不暗化。 */
+int64_t sensor_ms_since_motion(void)
+{
+	if (sensor_last_active_ms < 0) {
+		return 0;
+	}
+	int64_t since = k_uptime_get() - sensor_last_active_ms;
+	return since < 0 ? 0 : since;
 }
 
 static int sensor_scan(void);

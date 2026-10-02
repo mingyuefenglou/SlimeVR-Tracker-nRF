@@ -65,6 +65,9 @@ bool sensor_fusion_get_mag_ref(float *norm, float *dip);
 void sensor_request_fusion_reset(void);
 void sensor_request_fusion_bias_reset(void);
 
+/* 距最近一次"有意义运动"的毫秒数（LED 静止暗化消费；无采样构型恒回 0）。 */
+int64_t sensor_ms_since_motion(void);
+
 void wait_for_threads(void);
 void main_imu_suspend(void);
 void main_imu_resume(void);

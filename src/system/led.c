@@ -8,6 +8,9 @@
 
 #include "led.h"
 
+#include "sensor/sensor.h"    // sensor_ms_since_motion（静止 3 分钟暗化）
+#include "system/esb_ota.h"   // esb_ota_is_active（OTA 中豁免暗化）
+
 LOG_MODULE_REGISTER(led, LOG_LEVEL_INF);
 
 static void led_thread(void);
@@ -307,7 +310,7 @@ struct led_channel {
 
 static struct led_channel chans[LED_CH_COUNT];
 static enum led_display_mode led_mode = LED_MODE_DAILY;
-static uint16_t led_brightness_pptt = 4000; // 全局亮度乘数（默认 40%：3.3V/1kΩ 下红峰 ~1.1mA、绿蓝 ~0.2mA，暗光优先；ledbright 0-100 可调）
+static uint16_t led_brightness_pptt = 2000; // 全局亮度乘数（默认 20%，ledbright 0-100 可调；呼吸图案峰=满刻度，此值即峰顶占空）
 
 /* LED 绑定表：物理位 LED1/2/3（=dts pwm-led0/1/2）上各是什么语义色（0=R 1=G 2=B）。
  * 默认恒等（pwm-led0=红/1=绿/2=蓝，与 dts 色序约定一致）。
@@ -334,9 +337,8 @@ static const struct pwm_dt_spec *const led_pwms[LED_CH_COUNT] = {&pwm_led, &pwm_
  * 计数信号量无此窗口：give 在线程 take 之前也会计数，线程随后立即通过。 */
 static K_SEM_DEFINE(led_wake_sem, 0, 1);
 
-// 琥珀分量（充电/低电/OTA 的红绿混色比）
-#define AMBER_RED_PPTT 6000
-#define AMBER_GREEN_PPTT 4000
+/* 通道语义定稿（第六轮废除琥珀混色——琥珀与单色肉眼难辨）：
+ * 红=电力域（充电/低电），蓝=链路/升级域（心跳/OTA 快呼吸），绿=生命体征/确认。 */
 
 // pattern → 通道掩码（分配表·通道语义；两模式相同，手法差异在 led_compute）
 static uint32_t pattern_mask(enum sys_led_pattern p)
@@ -366,8 +368,9 @@ static uint32_t pattern_mask(enum sys_led_pattern p)
 		return CH_G; // 绿=生命体征/确认
 	case SYS_LED_PATTERN_LONG_PERSIST:
 	case SYS_LED_PATTERN_PULSE_PERSIST:
+		return CH_R; // 红=电力域（充电/低电，纯色）
 	case SYS_LED_PATTERN_DFU:
-		return CH_R | CH_G; // 琥珀=电池域（红绿协同）
+		return CH_B; // 蓝=升级域（OTA 纯色快呼吸）
 	case SYS_LED_PATTERN_CAL_PROGRESS:
 		return CH_R | CH_G; // 红→绿进度渐变
 	case SYS_LED_PATTERN_FAST_GREEN:
@@ -420,8 +423,8 @@ static uint32_t led_compute(enum led_ch ch, enum sys_led_pattern p, uint32_t *st
 
 	case SYS_LED_PATTERN_ACTIVE_PERSIST: { // 绿·工作
 		if (daily) {
-			// 慢呼吸：10s 周期（2s 升+2s 降+6s 灭），峰 25%
-			v = breath_shape(now % 10000, 10000, 2000, 2000, 6000);
+			// 30s 墙钟栅格 swell：1.2s 升+1.2s 降 @0s，峰=满刻度（ledbright 定标基准）
+			v = breath_shape(now % 30000, 30000, 1200, 1200, 10000);
 			st = 20;
 		} else {
 			v = (now % 10000) < 300 ? 10000 : 0; // 300ms blip/10s
@@ -430,10 +433,10 @@ static uint32_t led_compute(enum led_ch ch, enum sys_led_pattern p, uint32_t *st
 		break;
 	}
 
-	case SYS_LED_PATTERN_CONNECT_HEARTBEAT: { // 蓝·链路心跳（与绿错峰 2.5s）
-		uint32_t phase = (now + 7500) % 10000; // 相位后移 2.5s → 两峰永不撞
+	case SYS_LED_PATTERN_CONNECT_HEARTBEAT: { // 蓝·链路心跳（30s 栅格 @15s 反相，与绿 swell 永不错峰重叠）
+		uint32_t phase = (now + 15000) % 30000; // 相位后移 15s → 与绿 swell 互为反相
 		if (daily) {
-			v = breath_shape(phase, 10000, 2500, 2500, 5000);
+			v = breath_shape(phase, 30000, 1200, 1200, 5000);
 			st = 20;
 		} else {
 			v = phase < 300 ? 10000 : 0;
@@ -444,11 +447,12 @@ static uint32_t led_compute(enum led_ch ch, enum sys_led_pattern p, uint32_t *st
 
 	case SYS_LED_PATTERN_SHORT: { // 蓝·未配对/搜台
 		if (daily) {
-			// 双短呼吸：4s 周期内两次 300ms 起伏（0 与 1.0s 处），峰 40%
-			uint32_t phase = now % 4000;
-			v = breath_shape(phase, 4000, 300, 300, 6000);
-			if (phase >= 1000 && phase < 1600) {
-				v = breath_shape(phase - 1000, 600, 300, 300, 6000);
+			// 30s 栅格双 swell @10s 与 @20s（各 1.2s 升+1.2s 降，峰 60%）——与绿 @0s 等距 10s 交替
+			uint32_t phase = now % 30000;
+			if (phase >= 10000 && phase < 12400) {
+				v = breath_shape(phase - 10000, 2400, 1200, 1200, 6000);
+			} else if (phase >= 20000 && phase < 22400) {
+				v = breath_shape(phase - 20000, 2400, 1200, 1200, 6000);
 			}
 			st = 20;
 		} else {
@@ -596,22 +600,20 @@ static uint32_t led_compute(enum led_ch ch, enum sys_led_pattern p, uint32_t *st
 		st = 500;
 		break;
 
-	case SYS_LED_PATTERN_PULSE_PERSIST: { // 充电中：琥珀常亮直到充满
-		// 1kΩ 限流电气推算：红峰值 1.1mA、绿仅 0.2mA——等观感须压红抬绿
-		uint32_t base = (ch == LED_CH_R) ? 1500 : 4500;
+	case SYS_LED_PATTERN_PULSE_PERSIST: { // 充电中：纯红低亮微呼吸直到充满
 		if (daily) {
 			uint32_t wob = breath_shape(now % 3000, 3000, 1500, 1500, 500);
-			v = base + wob / 2; // ±~2.5% 微呼吸防死板
+			v = 1200 + wob / 2; // 12%±2.5% 微呼吸防死板（红 1kΩ 电流大，压亮度）
 			st = 40;
 		} else {
-			v = (ch == LED_CH_R) ? 2000 : 5000;
+			v = 2000;
 			st = 200;
 		}
 		break;
 	}
 
-	case SYS_LED_PATTERN_LONG_PERSIST: { // 低电：琥珀虚弱呼吸 / 双闪
-		uint32_t peak = (ch == LED_CH_R) ? 800 : 2500;
+	case SYS_LED_PATTERN_LONG_PERSIST: { // 低电：纯红虚弱呼吸 / 双闪
+		const uint32_t peak = 800; // 红电气压到 8%（红峰值电流 ~1.1mA 是绿蓝 4-5 倍）
 		if (daily) {
 			v = breath_shape(now % 6000, 6000, 750, 750, peak);
 			st = 20;
@@ -624,13 +626,12 @@ static uint32_t led_compute(enum led_ch ch, enum sys_led_pattern p, uint32_t *st
 		break;
 	}
 
-	case SYS_LED_PATTERN_DFU: { // OTA：琥珀流动快呼吸 / 快闪
-		uint32_t mix = (ch == LED_CH_R) ? 2500 : 7000;
+	case SYS_LED_PATTERN_DFU: { // OTA：纯蓝快呼吸（1.2s 周期，峰 70%）/ 快闪
 		if (daily) {
-			v = mix * breath_shape(now % 1200, 1200, 600, 600, 10000) / 10000;
+			v = 7000 * breath_shape(now % 1200, 1200, 600, 600, 10000) / 10000;
 			st = 15;
 		} else {
-			v = (now % 200) < 100 ? mix : 0;
+			v = (now % 200) < 100 ? 7000 : 0;
 			st = 50;
 		}
 		break;
@@ -698,10 +699,15 @@ static enum sys_led_pattern resolve_channel(enum led_ch ch)
 	return SYS_LED_PATTERN_OFF;
 }
 
-// 渐灭需要把 value 转 PWM 占空（含全局亮度乘数）；按绑定表路由到物理位
+// 渐灭需要把 value 转 PWM 占空（含全局亮度乘数 + 静止暗化）；按绑定表路由到物理位
 static void led_channels_apply(void)
 {
-	const uint32_t br = led_brightness_pptt;
+	/* 静止 3 分钟减半（防佩戴者睡着后刺眼）：活动即瞬时恢复（无迟滞）；
+	 * OTA 中豁免——升级进度要看清楚。充电/错误/手势预告一并适用（用户："所有LED"）。 */
+	uint32_t br = led_brightness_pptt;
+	if (sensor_ms_since_motion() > 180000 && !esb_ota_is_active()) {
+		br = br / 2;
+	}
 	for (int sem = 0; sem < LED_CH_COUNT; sem++) {
 		uint32_t v = chans[sem].last_value * br / 10000;
 		if (v > 10000) {
@@ -730,6 +736,11 @@ static void led_thread(void)
 	if (retained->led_bind[0] <= LED_CH_B && retained->led_bind[1] <= LED_CH_B &&
 	    retained->led_bind[2] <= LED_CH_B) {
 		memcpy(led_phys_color, retained->led_bind, LED_CH_COUNT);
+	}
+	for (int i = 0; i < LED_CH_COUNT; i++) { // 防呆：PWM 设备就绪性显式上报（硬件层问题一眼定位）
+		if (!device_is_ready(led_pwms[i]->dev)) {
+			LOG_ERR("LED pwm device %d not ready", i);
+		}
 	}
 	led_resume(); // 进线程即确保 PWM 设备 ACTIVE（命脉）
 	while (1) {
