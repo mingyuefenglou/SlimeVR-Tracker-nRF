@@ -811,23 +811,28 @@ static void button_thread(void)
 		if (last_press && k_uptime_get() - last_press > 1000) {
 			LOG_INF("Button was pressed %d times", num_presses);
 			last_press = 0;
+			int n = num_presses;
+			num_presses = 0;
 			tracker_event_notice(TRACKER_EVENT_KIND_BUTTON, BUTTON_CLICK_GROUP,
-				(uint8_t)(num_presses < 255 ? num_presses : 255));
+				(uint8_t)(n < 255 ? n : 255));
 			tracker_events_notify();
+			/* 先清按下反馈灯/状态，再设确认灯——确认 oneshot 须最后写 HIGHEST 槽才不被逐出 */
+			set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_HIGHEST);
+			set_status(SYS_STATUS_BUTTON_PRESSED, false);
 			if (ota_busy) {
 				LOG_INF("Button action blocked by OTA");
 				set_led(SYS_LED_PATTERN_ONESHOT_PROGRESS, SYS_LED_PRIORITY_HIGHEST);
 			}
 #if CONFIG_USER_EXTRA_ACTIONS // TODO: extra actions are default until server can send commands to trackers
-			else if (num_presses >= 2 && num_presses <= 3) {
+			else if (n >= 2 && n <= 3) {
 				/* 连击仅保留 2=IMU 校准 / 3=配对；单击不重启，DFU 改长按进，
 				 * sys_reset_mode 入参被钳在 1/2，不再可能触发 mode 3+ 的 DFU。 */
-				sys_reset_mode(num_presses - 1);
+				sys_reset_mode(n - 1);
+				/* 连击确认灯：2=绿双闪（校准）/ 3=蓝三闪（配对），播完自清理 */
+				set_led(n == 2 ? SYS_LED_PATTERN_ONESHOT_X2 : SYS_LED_PATTERN_ONESHOT_X3,
+					SYS_LED_PRIORITY_HIGHEST);
 			}
 #endif
-			num_presses = 0;
-			set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_HIGHEST);
-			set_status(SYS_STATUS_BUTTON_PRESSED, false);
 		}
 		/* 阶梯长按：按住期间按已达时长切换档位预告灯（hold_zone 锁存，20ms 循环只写一次） */
 		if (press_time && button_read() && k_uptime_get() - press_time > 50) {
@@ -847,14 +852,14 @@ static void button_thread(void)
 				if (zone != hold_zone) {
 					hold_zone = zone;
 					switch (zone) {
-					case 1: // 绿闪：进入关机区（松手 [2s,6s) 生效）
-						set_led(SYS_LED_PATTERN_FLASH, SYS_LED_PRIORITY_HIGHEST);
+					case 1: // 仅绿快闪：进入关机区（松手 [2s,6s) 生效）——独占三灯，其它灯全灭
+						set_led(SYS_LED_PATTERN_FAST_GREEN, SYS_LED_PRIORITY_HIGHEST);
 						break;
-					case 2: // 蓝闪：进入 DFU 区（松手 [6s,10s) 生效）
-						set_led(SYS_LED_PATTERN_SHORT, SYS_LED_PRIORITY_HIGHEST);
+					case 2: // 仅蓝快闪：进入 DFU 区（松手 [6s,10s) 生效）
+						set_led(SYS_LED_PATTERN_FAST_BLUE, SYS_LED_PRIORITY_HIGHEST);
 						break;
-					case 3: // 琥珀闪：进入重启区（须按满 12s 生效）
-						set_led(SYS_LED_PATTERN_DFU, SYS_LED_PRIORITY_HIGHEST);
+					case 3: // 仅红快闪：进入重启区（须按满 12s 生效，红=最后手段）
+						set_led(SYS_LED_PATTERN_FAST_RED, SYS_LED_PRIORITY_HIGHEST);
 						break;
 					}
 				}

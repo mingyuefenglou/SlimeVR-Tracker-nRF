@@ -307,7 +307,7 @@ struct led_channel {
 
 static struct led_channel chans[LED_CH_COUNT];
 static enum led_display_mode led_mode = LED_MODE_DAILY;
-static uint16_t led_brightness_pptt = 8000; // 全局亮度乘数（默认 80%，ledbright 0-100 可调）
+static uint16_t led_brightness_pptt = 4000; // 全局亮度乘数（默认 40%：3.3V/1kΩ 下红峰 ~1.1mA、绿蓝 ~0.2mA，暗光优先；ledbright 0-100 可调）
 
 /* LED 绑定表：物理位 LED1/2/3（=dts pwm-led0/1/2）上各是什么语义色（0=R 1=G 2=B）。
  * 默认恒等（pwm-led0=红/1=绿/2=蓝，与 dts 色序约定一致）。
@@ -370,6 +370,14 @@ static uint32_t pattern_mask(enum sys_led_pattern p)
 		return CH_R | CH_G; // 琥珀=电池域（红绿协同）
 	case SYS_LED_PATTERN_CAL_PROGRESS:
 		return CH_R | CH_G; // 红→绿进度渐变
+	case SYS_LED_PATTERN_FAST_GREEN:
+	case SYS_LED_PATTERN_FAST_BLUE:
+	case SYS_LED_PATTERN_FAST_RED:
+		return CH_ALL; // 长按档位预告独占三灯（非目标通道渲染 0，压制一切残亮）
+	case SYS_LED_PATTERN_ONESHOT_X2:
+		return CH_G; // 2 连击确认=绿双闪
+	case SYS_LED_PATTERN_ONESHOT_X3:
+		return CH_B; // 3 连击确认=蓝三闪
 	default:
 		return CH_ALL;
 	}
@@ -547,6 +555,39 @@ static uint32_t led_compute(enum led_ch ch, enum sys_led_pattern p, uint32_t *st
 			led_oneshot_done(p);
 		}
 		st = 200;
+		break;
+	}
+
+	case SYS_LED_PATTERN_FAST_GREEN: // 长按档位预告（独占三通道）：仅目标色 100/100 快闪
+	case SYS_LED_PATTERN_FAST_BLUE:
+	case SYS_LED_PATTERN_FAST_RED: {
+		enum led_ch target = (p == SYS_LED_PATTERN_FAST_GREEN) ? LED_CH_G :
+				     (p == SYS_LED_PATTERN_FAST_BLUE) ? LED_CH_B : LED_CH_R;
+		if (ch == target) {
+			v = (now % 200) < 100 ? 10000 : 0; // 墙钟相位：步距被其它通道压缩也不失真
+			st = 20;
+		} else {
+			v = 0; // 非目标通道恒灭——呼吸/心跳/琥珀全被压制，"只有那一个灯在闪"
+			st = 100;
+		}
+		break;
+	}
+
+	case SYS_LED_PATTERN_ONESHOT_X2: // 连击确认：双闪/三闪 150/150（按经过时间，防步距压缩缩水）
+	case SYS_LED_PATTERN_ONESHOT_X3: {
+		if (*state == 0) {
+			*state = now + 1; // 存"起始+1"（POWERON 同款，0=未开始标记）
+		}
+		uint32_t elapsed = (now + 1) - *state;
+		uint32_t total = (p == SYS_LED_PATTERN_ONESHOT_X2) ? 600 : 900; // 双闪 600ms / 三闪 900ms
+		if (elapsed < total) {
+			v = (elapsed % 300) < 150 ? 10000 : 0;
+			st = 50;
+		} else {
+			led_oneshot_done(p);
+			v = 0;
+			st = 100;
+		}
 		break;
 	}
 
@@ -975,6 +1016,30 @@ static void led_thread(void)
 				set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_HIGHEST);
 			} else {
 				k_msleep(200);
+			}
+			break;
+
+		case SYS_LED_PATTERN_FAST_GREEN: // 单灯板兜底：绿/蓝→默认色、红→错误色，均 100/100 快闪
+		case SYS_LED_PATTERN_FAST_BLUE:
+			led_pattern_state = (led_pattern_state + 1) % 2;
+			led_pin_set(SYS_LED_COLOR_DEFAULT, 10000, led_pattern_state * 10000);
+			k_msleep(100);
+			break;
+		case SYS_LED_PATTERN_FAST_RED:
+			led_pattern_state = (led_pattern_state + 1) % 2;
+			led_pin_set(SYS_LED_COLOR_ERROR, 10000, led_pattern_state * 10000);
+			k_msleep(100);
+			break;
+
+		case SYS_LED_PATTERN_ONESHOT_X2: // 单灯板兜底：双闪/三闪后交还
+		case SYS_LED_PATTERN_ONESHOT_X3:
+			led_pattern_state++;
+			led_pin_set(SYS_LED_COLOR_DEFAULT, 10000, !(led_pattern_state % 2) * 10000);
+			if (led_pattern_state ==
+			    (current_led_pattern == SYS_LED_PATTERN_ONESHOT_X2 ? 5 : 7)) { // 2/3 次亮-灭循环后清
+				set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_HIGHEST);
+			} else {
+				k_msleep(150);
 			}
 			break;
 

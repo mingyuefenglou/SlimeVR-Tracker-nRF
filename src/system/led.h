@@ -67,6 +67,15 @@ enum sys_led_pattern {
 	SYS_LED_PATTERN_CONNECT_HEARTBEAT, // 蓝·链路心跳（配对成功后由 esb 设回）
 	SYS_LED_PATTERN_CAL_PROGRESS,      // 红→绿随进度插值（进度经 led_cal_progress 全局）
 
+	// 阶梯长按档位预告：独占三通道（其余灯全灭），仅目标色 100/100 快闪
+	SYS_LED_PATTERN_FAST_GREEN, // 关机档预告：仅绿快闪
+	SYS_LED_PATTERN_FAST_BLUE,  // DFU/OTA 档预告：仅蓝快闪
+	SYS_LED_PATTERN_FAST_RED,   // 重启档预告：仅红快闪（最暖色=最后手段）
+
+	// 连击确认 oneshot（松手判定后播放，播完自清理）
+	SYS_LED_PATTERN_ONESHOT_X2, // 绿双闪 150/150×2——2 连击(IMU 校准)确认
+	SYS_LED_PATTERN_ONESHOT_X3, // 蓝三闪 150/150×3——3 连击(配对)确认
+
 	SYS_LED_PATTERN__COUNT,
 };
 
