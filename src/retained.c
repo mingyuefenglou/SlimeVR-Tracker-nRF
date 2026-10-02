@@ -108,7 +108,7 @@ bool retained_validate(void)
 		/* LED 显示偏好默认（memset 后全 0：0 亮度=全灭、绑定全 R 皆非预期，须显式给默认）。
 		 * 放 CRC 外不动校准数据；每次刷机复位 retained 时给默认，避免 LED 全黑。 */
 		retained->led_mode = 0;    /* LED_MODE_DAILY */
-		retained->led_bright = 25; /* 默认 25%（数值=全域最大亮度/呼吸峰顶占空——所有灯效受它缩放，ledbright 可改） */
+		retained->led_bright = 25; /* 默认 25%（数值=全域最大亮度/满刻度图案峰顶占空——所有灯效受它缩放，ledbright 可改） */
 		retained->led_bind[0] = 0; /* LED1=R */
 		retained->led_bind[1] = 1; /* LED2=G */
 		retained->led_bind[2] = 2; /* LED3=B */

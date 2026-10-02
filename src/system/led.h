@@ -48,7 +48,7 @@ enum sys_led_pattern {
 	SYS_LED_PATTERN_ONESHOT_POWERON,  // 200ms on 200ms off, 3 times					// Default
 	SYS_LED_PATTERN_ONESHOT_POWEROFF, // 250ms off, 1000ms fade to off				// Default
 	SYS_LED_PATTERN_ONESHOT_PROGRESS, // 200ms on 200ms off, 2 times				// Success
-	SYS_LED_PATTERN_ONESHOT_COMPLETE, // 200ms on 200ms off, 4 times				// Success
+	SYS_LED_PATTERN_ONESHOT_COMPLETE, // 全彩闪烁 150/150×4（对频/校准完成）	// Success
 	SYS_LED_PATTERN_ONESHOT_PING,     // 200ms on 200ms off, 10 times				// Ping
 
 	SYS_LED_PATTERN_ON_PERSIST,     // 20% duty cycle									// Success | indicates charged

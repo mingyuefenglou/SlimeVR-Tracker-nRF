@@ -310,7 +310,7 @@ struct led_channel {
 
 static struct led_channel chans[LED_CH_COUNT];
 static enum led_display_mode led_mode = LED_MODE_DAILY;
-static uint16_t led_brightness_pptt = 2500; // 全局亮度乘数=全域最大亮度（默认 25%，ledbright 0-100 可调；所有灯效受它缩放，此值即峰顶占空）
+static uint16_t led_brightness_pptt = 2500; // 全局亮度乘数=全域最大亮度（默认 25%，ledbright 0-100 可调；所有灯效受它缩放，此值即满刻度图案的峰顶占空）
 
 /* LED 绑定表：物理位 LED1/2/3（=dts pwm-led0/1/2）上各是什么语义色（0=R 1=G 2=B）。
  * 默认恒等（pwm-led0=红/1=绿/2=蓝，与 dts 色序约定一致）。
@@ -347,6 +347,7 @@ static uint32_t pattern_mask(enum sys_led_pattern p)
 	case SYS_LED_PATTERN_OFF_FORCE:
 	case SYS_LED_PATTERN_OFF:
 	case SYS_LED_PATTERN_ONESHOT_POWEROFF:
+	case SYS_LED_PATTERN_ONESHOT_COMPLETE: // 完成灯=全彩（对频/校准：三通道同帧闪烁）
 	case SYS_LED_PATTERN_ERROR_A:
 	case SYS_LED_PATTERN_ERROR_B:
 	case SYS_LED_PATTERN_ERROR_C:
@@ -362,7 +363,6 @@ static uint32_t pattern_mask(enum sys_led_pattern p)
 	case SYS_LED_PATTERN_LONG:
 	case SYS_LED_PATTERN_FLASH:
 	case SYS_LED_PATTERN_ONESHOT_PROGRESS:
-	case SYS_LED_PATTERN_ONESHOT_COMPLETE:
 	case SYS_LED_PATTERN_ON_PERSIST:
 	case SYS_LED_PATTERN_ACTIVE_PERSIST:
 		return CH_G; // 绿=生命体征/确认
@@ -423,8 +423,8 @@ static uint32_t led_compute(enum led_ch ch, enum sys_led_pattern p, uint32_t *st
 
 	case SYS_LED_PATTERN_ACTIVE_PERSIST: { // 绿·工作
 		if (daily) {
-			// 20s 墙钟栅格起伏：1.2s 升+1.2s 降 @0s，峰=满刻度（ledbright 定标基准）
-			v = breath_shape(now % 20000, 20000, 1200, 1200, 10000);
+			// 20s 墙钟栅格起伏 @0s：1.2s 升+1.2s 降，峰与链路心跳同（50%）——两灯等权交替
+			v = breath_shape(now % 20000, 20000, 1200, 1200, 5000);
 			st = 20;
 		} else {
 			v = (now % 10000) < 300 ? 10000 : 0; // 300ms blip/10s
@@ -532,19 +532,25 @@ static uint32_t led_compute(enum led_ch ch, enum sys_led_pattern p, uint32_t *st
 		break;
 	}
 
-	case SYS_LED_PATTERN_ONESHOT_COMPLETE: { // 完成：日常=饱满单次渐亮渐灭；调试=4 连闪
-		uint32_t i = (*state)++;
+	case SYS_LED_PATTERN_ONESHOT_COMPLETE: { // 完成（对频/校准）：日常=全彩闪烁 1.2s；调试=全彩连闪
 		if (daily) {
-			if (i <= 60) { // 1.2s
-				v = (i <= 30) ? 10000 * i / 30 : 10000 * (60 - i) / 30;
+			// 全彩闪烁：150ms 亮/150ms 灭 ×4 = 1.2s。按经过时间判定（防步距被其他通道拉小缩水）
+			if (*state == 0) {
+				*state = now + 1; // 存"起始+1"（POWERON 同款，0=未开始标记）
+			}
+			uint32_t elapsed = (now + 1) - *state;
+			if (elapsed < 1200) {
+				v = ((elapsed / 150) % 2 == 0) ? 10000 : 0;
 				st = 20;
 			} else {
 				led_oneshot_done(p);
+				v = 0;
 				st = 100;
 			}
 		} else {
-			v = !(i % 2) * 10000;
-			if (i == 9) {
+			uint32_t i = (*state)++;
+			v = !(i % 2) * 10000; // 值不引用 ch → CH_ALL 下三通道同帧全彩
+			if (i >= 9) { // >=（非 ==）：防 daily→debug 穿越时 state 持旧时间戳永不命中
 				led_oneshot_done(p);
 			}
 			st = 200;
