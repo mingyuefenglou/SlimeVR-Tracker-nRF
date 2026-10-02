@@ -141,6 +141,12 @@ struct retained_data {
 		uint32_t magic;                // Magic number to validate watchdog state
 	} watchdog_state;
 
+	// Error self-heal reboot state (persists across error reboots, outside CRC validation)
+	struct {
+		uint32_t magic;   // Magic number to validate error_reboot state
+		uint8_t count;    // Consecutive error-triggered reboots (loop guard)
+	} error_reboot;
+
 	// LED 显示偏好（放 CRC 外：改动不失效校准数据；0xFF=未初始化）
 	uint8_t led_mode;   // 分配表：0=日常（呼吸族） 1=调试（闪烁族）
 	uint8_t led_bright; // 全局亮度百分比（0-100）
@@ -149,6 +155,9 @@ struct retained_data {
 
 /* Magic number to validate watchdog state */
 #define WATCHDOG_STATE_MAGIC 0x57445447  /* "WDTG" in ASCII */
+
+/* Magic number to validate error_reboot state ("ERSH" = Error Self-Heal) */
+#define ERROR_REBOOT_STATE_MAGIC 0x45525348
 
 /* Up to 4 KB of retained data allowed right now.
  */

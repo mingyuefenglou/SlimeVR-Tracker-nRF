@@ -723,18 +723,28 @@ bool button_read(void)
 }
 
 #if BUTTON_EXISTS // Alternate button if available to use as "reset key"
-static bool shutdown_hint_on;
+/* 阶梯长按手势阈值（ms）。三档电源动作时间错开、罕用档留足余量防误触：
+ * 快按快松 <1.2s = 单击/连击（无电源动作）；松手 [2s,6s) = 关机（常用，2s 即可触发）；
+ * 松手 [6s,10s) = 进 DFU/OTA（罕用，与关机隔 4s）；按满 12s = 重启（最后手段，须按到底）。
+ * [1.2s,2s) 与 [10s,12s) 是取消窗——松手即取消，只有窗口正确才动作。 */
+#define BTN_CLICK_MAX_MS     1200  /* <1.2s 才算单击/连击 */
+#define BTN_GRACE_END_MS     2000  /* 松手 [1.2s,2s)=取消宽限窗；[2s,6s)=关机 */
+#define BTN_SHUTDOWN_PREV_MS 1200  /* 绿闪预告起点（关机区） */
+#define BTN_DFU_PREV_MS      6000  /* 蓝闪预告起点（DFU 区）；松手 [6s,10s)=进 DFU */
+#define BTN_REBOOT_PREV_MS   10000 /* 琥珀预告起点（重启区）；松手 [10s,12s)=取消 */
+#define BTN_REBOOT_MS        12000 /* 按住满 12s = 重启（须按到底，防误触） */
 
 static void button_thread(void)
 {
 	int num_presses = 0;
 	int64_t last_press = 0;
+	int hold_zone = 0; // 当前长按档位预告：0=无 1=关机(绿闪) 2=DFU(蓝闪) 3=重启(琥珀)
 
 	/* Register button thread with watchdog */
 	watchdog_register_thread(WDT_CHANNEL_BUTTON, 0);
 
 	static bool hold_led_latched = false; // 按住反馈只点亮一次，避免每 20ms 重写 HIGHEST 槽
-					    // 把关机预告（FLASH）逐出——上板"2s 无预告"的根因
+					    // 把档位预告（FLASH/SHORT/DFU）逐出——上板"2s 无预告"的根因
 	while (1) {
 		if (press_time && k_uptime_get() - press_time > 50) // debounce
 		{
@@ -748,19 +758,56 @@ static void button_thread(void)
 		} else if (!press_time) {
 			hold_led_latched = false;
 		}
-		if (last_press_duration > 50) // debounce
-		{
-			if (!get_status(SYS_STATUS_BUTTON_PRESSED)) {
-				set_status(SYS_STATUS_BUTTON_PRESSED, true);
-			}
-			num_presses++;
-			LOG_INF("Button pressed %d times", num_presses);
-			last_press_duration = 0;
-			last_press = k_uptime_get();
-			set_led(SYS_LED_PATTERN_ON, SYS_LED_PRIORITY_HIGHEST);
-		}
 		/* Block all button actions during OTA (active or suppressed) */
 		bool ota_busy = esb_ota_is_active() || connection_get_ota_suppressed();
+		if (last_press_duration > 50) { // 松手事件（去抖后）
+			int64_t dur = last_press_duration;
+			last_press_duration = 0;
+			hold_zone = 0; // 档位预告到此终结，后续动作自带灯光
+			if (dur < BTN_CLICK_MAX_MS) {
+				/* 快按快松 = 单击/连击（单击不再有电源动作，重启改长按 12s） */
+				num_presses++;
+				LOG_INF("Button pressed %d times", num_presses);
+				last_press = k_uptime_get();
+				if (!get_status(SYS_STATUS_BUTTON_PRESSED)) {
+					set_status(SYS_STATUS_BUTTON_PRESSED, true);
+				}
+				set_led(SYS_LED_PATTERN_ON, SYS_LED_PRIORITY_HIGHEST);
+			} else if (ota_busy) {
+				/* OTA 升级中屏蔽全部电源手势 */
+				LOG_INF("Button hold action blocked by OTA");
+				set_status(SYS_STATUS_BUTTON_PRESSED, false);
+				set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_HIGHEST);
+			} else if (dur >= BTN_REBOOT_PREV_MS) {
+				/* [10s,12s) 松手 = 取消：重启必须按满 12s，防误触 */
+				LOG_INF("Button hold %d ms canceled (reboot needs full 12 s)", (int)dur);
+				set_status(SYS_STATUS_BUTTON_PRESSED, false);
+				set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_HIGHEST);
+			} else if (dur >= BTN_DFU_PREV_MS) {
+				/* [6s,10s) 松手 = 进 DFU(UF2)；渐灭告别动画后再提交 */
+				LOG_INF("Button hold %d ms: enter DFU", (int)dur);
+				set_status(SYS_STATUS_BUTTON_PRESSED, false);
+				set_led(SYS_LED_PATTERN_ONESHOT_POWEROFF, SYS_LED_PRIORITY_HIGHEST);
+				k_msleep(1350);
+				sys_enter_dfu(false);
+			} else if (dur >= BTN_GRACE_END_MS) {
+				/* [2s,6s) 松手 = 关机（睡眠）——sys_user_shutdown 内含渐灭+1500ms */
+				LOG_INF("Button hold %d ms: shutdown", (int)dur);
+				set_status(SYS_STATUS_BUTTON_PRESSED, false);
+				int err = sys_user_shutdown();
+				if (err == 0) { // shutting down or rebooting
+					k_thread_abort(button_thread_id);
+				}
+				/* err>0=按住取消窗触发（松手触发场景罕见）；err<0=PM 拒绝。
+				 * sys_user_shutdown 已清灯，继续运行。 */
+				LOG_WRN("Button shutdown not executed: %d", err);
+			} else {
+				/* [1.2s,2s) 宽限窗松手 = 取消（用户反悔机会） */
+				LOG_INF("Button hold %d ms canceled (grace window)", (int)dur);
+				set_status(SYS_STATUS_BUTTON_PRESSED, false);
+				set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_HIGHEST);
+			}
+		}
 		if (last_press && k_uptime_get() - last_press > 1000) {
 			LOG_INF("Button was pressed %d times", num_presses);
 			last_press = 0;
@@ -770,19 +817,11 @@ static void button_thread(void)
 			if (ota_busy) {
 				LOG_INF("Button action blocked by OTA");
 				set_led(SYS_LED_PATTERN_ONESHOT_PROGRESS, SYS_LED_PRIORITY_HIGHEST);
-			} else if (num_presses == 1) {
-				if (test_mode_get()) {
-					LOG_INF("Button reboot blocked by test mode");
-				} else {
-					// 重启告别渐灭（与长按关机同款动画，体验一致；
-					// 动画 ~1.1s 后再提交重启）
-					set_led(SYS_LED_PATTERN_ONESHOT_POWEROFF, SYS_LED_PRIORITY_HIGHEST);
-					k_msleep(1350);
-					sys_request_system_reboot();
-				}
 			}
 #if CONFIG_USER_EXTRA_ACTIONS // TODO: extra actions are default until server can send commands to trackers
-			if (!ota_busy) {
+			else if (num_presses >= 2 && num_presses <= 3) {
+				/* 连击仅保留 2=IMU 校准 / 3=配对；单击不重启，DFU 改长按进，
+				 * sys_reset_mode 入参被钳在 1/2，不再可能触发 mode 3+ 的 DFU。 */
 				sys_reset_mode(num_presses - 1);
 			}
 #endif
@@ -790,46 +829,54 @@ static void button_thread(void)
 			set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_HIGHEST);
 			set_status(SYS_STATUS_BUTTON_PRESSED, false);
 		}
-		// 2s 触发关机流程（原 1s）；触发前绿快闪预告「将要关机」
-		// 关机预告：按住 1.2s 起绿快闪提示（2s 才真正执行；0.8s 窗口给用户反悔机会）
-		if (press_time && button_read() && k_uptime_get() - press_time > 1200 &&
-		    k_uptime_get() - press_time <= 2000) {
-			if (!shutdown_hint_on) {
-				shutdown_hint_on = true;
-				set_led(SYS_LED_PATTERN_FLASH, SYS_LED_PRIORITY_HIGHEST);
-			}
-		} else if (shutdown_hint_on && (!press_time || !button_read())) {
-			shutdown_hint_on = false;
-			set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_HIGHEST);
-		}
-
-		if (press_time && k_uptime_get() - press_time > 2000 && button_read()) // Button is being held
-		{
+		/* 阶梯长按：按住期间按已达时长切换档位预告灯（hold_zone 锁存，20ms 循环只写一次） */
+		if (press_time && button_read() && k_uptime_get() - press_time > 50) {
+			int64_t held_ms = k_uptime_get() - press_time;
 			if (ota_busy) {
-				LOG_INF("Button hold blocked by OTA");
-				press_time = 0;
-				set_led(SYS_LED_PATTERN_ONESHOT_PROGRESS, SYS_LED_PRIORITY_HIGHEST);
-				set_status(SYS_STATUS_BUTTON_PRESSED, false);
-			} else {
-				int err = sys_user_shutdown();
-				if (err > 0) {
-#if CONFIG_USER_EXTRA_ACTIONS
-					LOG_INF("Button hold timeout, shutdown canceled");
-#else
-					LOG_INF("Pairing requested");
-					esb_reset_pair();
-#endif
+				if (held_ms >= BTN_SHUTDOWN_PREV_MS) {
+					/* OTA 升级中屏蔽全部电源手势：清按压状态并反馈进度灯 */
 					press_time = 0;
-					set_status(SYS_STATUS_BUTTON_PRESSED, false); // TODO: is needed?
-				} else if (err == 0) { // shutting down or rebooting
-					k_thread_abort(button_thread_id);
-				} else {
-					LOG_WRN("Button shutdown rejected: %d", err);
-					press_time = 0;
-					set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_HIGHEST);
+					LOG_INF("Button hold blocked by OTA");
+					set_led(SYS_LED_PATTERN_ONESHOT_PROGRESS, SYS_LED_PRIORITY_HIGHEST);
 					set_status(SYS_STATUS_BUTTON_PRESSED, false);
 				}
+			} else {
+				int zone = held_ms >= BTN_REBOOT_PREV_MS ? 3 :
+					   held_ms >= BTN_DFU_PREV_MS ? 2 :
+					   held_ms >= BTN_SHUTDOWN_PREV_MS ? 1 : 0;
+				if (zone != hold_zone) {
+					hold_zone = zone;
+					switch (zone) {
+					case 1: // 绿闪：进入关机区（松手 [2s,6s) 生效）
+						set_led(SYS_LED_PATTERN_FLASH, SYS_LED_PRIORITY_HIGHEST);
+						break;
+					case 2: // 蓝闪：进入 DFU 区（松手 [6s,10s) 生效）
+						set_led(SYS_LED_PATTERN_SHORT, SYS_LED_PRIORITY_HIGHEST);
+						break;
+					case 3: // 琥珀闪：进入重启区（须按满 12s 生效）
+						set_led(SYS_LED_PATTERN_DFU, SYS_LED_PRIORITY_HIGHEST);
+						break;
+					}
+				}
+				if (held_ms >= BTN_REBOOT_MS) {
+					/* 按满 12s = 重启（最后手段）；press_time 清零防重复触发 */
+					press_time = 0;
+					hold_zone = 0;
+					set_status(SYS_STATUS_BUTTON_PRESSED, false);
+					if (test_mode_get()) {
+						LOG_INF("Button reboot blocked by test mode");
+						set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_HIGHEST);
+					} else {
+						LOG_INF("Button hold 12 s: reboot");
+						set_led(SYS_LED_PATTERN_ONESHOT_POWEROFF, SYS_LED_PRIORITY_HIGHEST);
+						k_msleep(1350);
+						sys_request_system_reboot();
+					}
+				}
 			}
+		} else if (hold_zone) { // 松手/异常：清档位预告灯
+			hold_zone = 0;
+			set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_HIGHEST);
 		}
 
 		/* Feed watchdog at end of each loop iteration */

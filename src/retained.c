@@ -100,8 +100,18 @@ bool retained_validate(void)
 		retained->watchdog_state.total_wdt_resets = 0;
 		retained->watchdog_state.last_failed_channel = 0;
 		retained->watchdog_state.last_reset_uptime = 0;
+		/* Initialize error_reboot state with valid magic but zero count */
+		retained->error_reboot.magic = ERROR_REBOOT_STATE_MAGIC;
+		retained->error_reboot.count = 0;
 		/* Stored channel encoding: 0xFF = default (see esb.h helpers). */
 		retained->rf_channel = 0xFF;
+		/* LED 显示偏好默认（memset 后全 0：0 亮度=全灭、绑定全 R 皆非预期，须显式给默认）。
+		 * 放 CRC 外不动校准数据；每次刷机复位 retained 时给默认，避免 LED 全黑。 */
+		retained->led_mode = 0;    /* LED_MODE_DAILY */
+		retained->led_bright = 80; /* 默认 80%（ledbright 可调 0-100） */
+		retained->led_bind[0] = 0; /* LED1=R */
+		retained->led_bind[1] = 1; /* LED2=G */
+		retained->led_bind[2] = 2; /* LED3=B */
 	}
 
 	/* Reset to accrue runtime from this session. */
