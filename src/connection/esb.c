@@ -117,6 +117,10 @@ static const uint8_t __maybe_unused ESB_ALLOWED_CHANNELS[] = {
 #define PING_BACKOFF_LVL1_THRESHOLD 2
 #define PING_BACKOFF_LVL1_MS        500
 
+/* 蓝灯判据「链路活跃」：连续 N 次 PING 无 PONG（≈3s）即判与 receiver 失去通讯。
+ * 只影响 LED 呈现（单拍↔双击），不影响 TX_ERROR_THRESHOLD 的错误/关机流程。 */
+#define LINK_LIVE_MISS_THRESHOLD 3
+
 LOG_MODULE_REGISTER(esb_event, LOG_LEVEL_INF);
 
 static void esb_thread(void);
@@ -139,6 +143,8 @@ static uint32_t ping_failures = 0;
 static uint32_t ping_ctr_sent = 0;
 static uint8_t ping_counter = 0;
 static int64_t ping_send_time = 0;
+static int64_t last_pong_ms = 0; // 本次上电最近一次有效 PONG 时刻（0=尚未收到）
+static bool esb_link_is_live(void); // 前向声明：失败计数路径（更早处）也在调用
 
 
 // Track send cycles for recent PINGs (circular buffer)
@@ -1099,6 +1105,10 @@ void event_handler(struct esb_evt const *event)
 			ping_pending = false;    // Clear the pending flag
 			ping_success_streak = 0; // Reset recovery streak on any failure
 			ping_failures++;
+			// 蓝灯：首次跨过掉线阈值（此刻判据必为 not-live）→ 回双击
+			if (ping_failures == LINK_LIVE_MISS_THRESHOLD) {
+				esb_restore_conn_led();
+			}
 		}
 
 		if (ping_failures > 0 && ping_failures % 10 == 0 && last_tx.type == ESB_PING_TYPE) // Log every 10 failures
@@ -1183,10 +1193,15 @@ void event_handler(struct esb_evt const *event)
 						// For now, accept these responses as valid to maintain connectivity
 						LOG_WRN("Received PONG for tracker ID %u (local ID %u)", rx_id, tracker_id);
 						// set ping valid
+						bool was_live = esb_link_is_live(); // 重置计数前先取当前活跃态（边沿判定）
 						ping_pending = false;
 						ping_failed = false;
 						ping_failures = 0;
 						esb_conn_state = ESB_ST_PAIRED;
+						last_pong_ms = k_uptime_get();
+						if (!was_live) {
+							esb_restore_conn_led(); // 关→开沿：双击回单拍
+						}
 						if (get_status(SYS_STATUS_CONNECTION_ERROR) == true) {
 							set_status(SYS_STATUS_CONNECTION_ERROR, false);
 							connection_error_start_time = 0;
@@ -1203,10 +1218,15 @@ void event_handler(struct esb_evt const *event)
 					}
 
 					// set ping valid first
+					bool was_live = esb_link_is_live(); // 重置计数前先取当前活跃态（边沿判定）
 					ping_pending = false;
 					ping_failed = false;
 					ping_failures = 0;
 					esb_conn_state = ESB_ST_PAIRED;
+					last_pong_ms = k_uptime_get();
+					if (!was_live) {
+						esb_restore_conn_led(); // 关→开沿：双击回单拍
+					}
 					if (get_status(SYS_STATUS_CONNECTION_ERROR) == true) {
 						ping_success_streak++;
 						if (ping_success_streak >= PING_RECOVERY_THRESHOLD) {
@@ -1753,16 +1773,23 @@ void esb_set_pair(uint64_t addr)
 			  sizeof(paired_addr)); // Write new address and tracker id
 }
 
-/* 恢复链路域 LED 静息态：已配对=心跳，未配对=搜台双击。
- * 三个历史根因造成槽 2 永久 OFF（蓝灯再也不亮）：① 已配对重启后 CONNECT_HEARTBEAT
- * 从不设置（唯一 set 点在首配分支内）；② 连接错误清除处无人重设；③ OTA 结束边沿写裸 OFF。
- * 三个恢复点（esb_pair 尾 / PONG 恢复 ×2 / OTA 结束边沿）统一调本函数。 */
+/* 链路活跃判据（蓝灯唯一依据，与配对记忆无关）：本次上电收到过 PONG，
+ * 且连续 PING 失败 < LINK_LIVE_MISS_THRESHOLD（≈3s 无 PONG 即判掉线）。 */
+static bool esb_link_is_live(void)
+{
+	return last_pong_ms != 0 && ping_failures < LINK_LIVE_MISS_THRESHOLD;
+}
+
+/* 恢复链路域 LED 静息态：链路活跃=心跳单拍；未连接（未配对/搜台、已配对但无通讯）=双击。
+ * 四个历史根因造成槽 2 永久 OFF（蓝灯再也不亮）：① 已配对重启后无人设心跳；
+ * ② 连接错误清除处无人重设；③ OTA 结束边沿写裸 OFF；④ 搜台 re-init 失败清槽无人重设。
+ * 恢复点：esb_pair 尾 / PONG（关→开沿 + 错误恢复 ×2）/ PING 失败跨阈值 / OTA 结束边沿。 */
 void esb_restore_conn_led(void)
 {
 	if (esb_ota_is_active()) {
 		return; // OTA 会话拥有蓝通道，勿覆盖 DFU 快呼吸
 	}
-	set_led(paired_addr[0] ? SYS_LED_PATTERN_CONNECT_HEARTBEAT : SYS_LED_PATTERN_SHORT,
+	set_led(esb_link_is_live() ? SYS_LED_PATTERN_CONNECT_HEARTBEAT : SYS_LED_PATTERN_SHORT,
 		SYS_LED_PRIORITY_CONNECTION);
 }
 
@@ -1801,6 +1828,8 @@ void esb_pair(void)
 			if (!esb_initialized) {
 				esb_set_addr_discovery();
 				esb_initialize(true);
+				// init 失败会在 esb_initialize 内同步清掉蓝槽（status.c CONNECTION_ERROR）——重设搜台灯
+				set_led(SYS_LED_PATTERN_SHORT, SYS_LED_PRIORITY_CONNECTION);
 			}
 			if (!clock_status) {
 				clocks_start();
@@ -1839,8 +1868,10 @@ void esb_pair(void)
 			esb_send_pair_step(2); // "acknowledge" pairing from receiver
 			k_msleep(996);
 		}
-		// 三通道：绿单次渐亮确认（HIGHEST，自清理）+ 蓝链路心跳常驻（CONNECTION 槽）
-		set_led(SYS_LED_PATTERN_CONNECT_HEARTBEAT, SYS_LED_PRIORITY_CONNECTION);
+		// 三通道：全彩闪烁确认（HIGHEST，自清理）+ 蓝链路心跳常驻（CONNECTION 槽）
+		// 配对握手完成 = 与 receiver 建立通讯：置链路活跃，避免 esb_pair 尾判据未活降级成双击
+		last_pong_ms = k_uptime_get();
+		esb_restore_conn_led();
 		set_led(SYS_LED_PATTERN_ONESHOT_COMPLETE, SYS_LED_PRIORITY_HIGHEST);
 		LOG_INF("Paired");
 		/* RX only copied the identity; entropy and queue reset belong here,
@@ -1873,6 +1904,7 @@ void esb_reset_pair(void)
 		esb_deinitialize(); // make sure esb is off
 		esb_conn_state = ESB_ST_PAIRING;
 		memset(paired_addr, 0, sizeof(paired_addr));
+		last_pong_ms = 0; // 回未连接：蓝灯判据立即复位，搜台双击接管
 		tracker_events_session_changed();
 		LOG_INF("Pairing requested");
 	}
@@ -2398,6 +2430,10 @@ static void esb_thread(void)
 			ping_pending = false;
 			ping_success_streak = 0;
 			ping_failures++;
+			// 蓝灯：首次跨过掉线阈值（此刻判据必为 not-live）→ 回双击
+			if (ping_failures == LINK_LIVE_MISS_THRESHOLD) {
+				esb_restore_conn_led();
+			}
 			LOG_WRN("PING timeout, failures=%u", ping_failures);
 			if (ping_failures == TX_ERROR_THRESHOLD) {
 				connection_error_start_time = now_idle;

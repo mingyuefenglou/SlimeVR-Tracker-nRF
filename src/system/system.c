@@ -1034,7 +1034,7 @@ void sys_reset_mode(uint8_t mode)
 #endif
 	case 2: // Reset mode pairing reset
 		LOG_INF("Pairing reset requested");
-		esb_reset_pair();
+		esb_clear_pair(); // 持久清除（写 NVS 零）：重启/刷机不复活旧配对
 		break;
 #if DFU_EXISTS // Using DFU bootloader
 #if !defined(CONFIG_BOARD_STYRIA_MINI_UF2)
