@@ -1,158 +1,149 @@
-# NiNi SlimeNRF Tracker 固件
+# SlimeNRF tracker firmware
 
-> 基于 SlimeNRF 生态的 nRF52833 全身追踪器固件 —— ICM-40608 + QMC5883P 磁力计、三共阴 LED、ESB OTA。
+Zephyr/NCS firmware for SlimeNRF motion trackers on Nordic nRF52 and nRF54L SoCs.
 
-[![build](https://github.com/mingyuefenglou/SlimeVR-Tracker-nRF/actions/workflows/workflow.yml/badge.svg?branch=NiNi_Slime_5883)](https://github.com/mingyuefenglou/SlimeVR-Tracker-nRF/actions/workflows/workflow.yml)
-![NCS](https://img.shields.io/badge/NCS-v3.4.1_LTS-00A9CE)
-![MCU](https://img.shields.io/badge/MCU-nRF52833-333333)
-![license](https://img.shields.io/badge/license-Apache--2.0_/_MIT-lightgrey)
+## Project history
 
-## 特性
+This firmware is originally based on [SlimeVR/SlimeVR-Tracker-nRF](https://github.com/SlimeVR/SlimeVR-Tracker-nRF). Thanks for their work and for maintaining the project.
 
-| 模块 | 说明 |
-|---|---|
-| **传感** | ICM-40608 主 IMU（16 字节 FIFO、±16g/±2000dps、陀螺/加计双 AAF 抗混叠）· QMC5883P 磁力计（QST 车规线，上游无驱动）· MMC5983MA / ICM-4268x 滤波调优 |
-| **LED** | 三通道并行渲染（20s 墙钟栅格错峰：绿起伏与蓝心跳等距交替，永不追尾）；日常（呼吸）/调试（闪烁）双状态表；`ledmap` 物理位 ↔ 语义色免重编重绑；静止 3 分钟自动减半 |
-| **功耗** | IMUCLK 32.768kHz 门控（默认关、探测自动开）· WOM 睡眠 · 充电静默 + USB 通讯防睡 |
-| **升级** | ESB OTA + UF2 双路；配套 Adafruit BL（断电/误触多重加固） |
+This repo was forked from [LyallUlric/Stacked-SmolSlime](https://github.com/LyallUlric/Stacked-SmolSlime) (stacked Promicro builds on top of the official tracker firmware), not from upstream `main`. When Stacked-SmolSlime stopped being maintained, We continued development here.
 
-## 分支说明
+A hard fork followed because upstream `main` history was hard-reset, development direction was unclear and slowly, and upstream discouraged AI agent coding. This fork keeps history from before that reset and continues development. It started from my personal gaming needs. It now also covers many requests from the community and from Chinese DIY SlimeVR-compatible tracker builders.
 
-| 分支 | 用途 |
-|---|---|
-| `main` | 稳定发布线——验证通过的版本（日常刷机用这里） |
-| `NiNi_Slime_5883` | 开发线——板级定制与功能开发在此进行，验证后合入 `main` |
-| `dev` | jitingcn 上游镜像（本仓不在此开发）——跟进上游更新、比对差异、合并上游修复 |
+Changes are driven by real playtesting, user needs, and normal software engineering practice. Untested patches are not accepted on that basis alone.
 
-开发流程：在 `NiNi_Slime_5883` 提交 → 上板验证 → 合入 `main` 发布。
+## Major differences from upstream
 
-## 项目来源
+- Remote command from receiver side
+- Tweaked VQF fusion parameters and backend
+- Add mag support properly for ICM45686/LSM6DSV and QMC6309 (other mags are not well tested)
+- More sensor calibration options and features
+- Custom sdk-nrf fork with more features and fixes
+- Different TDMA radio scheduling, clock sync methods
+- OTA support via BLE/ESB
+- Configurable IMU/mag sensor driver whitelist
+- Resting state policy refinements, Different WoM policy
+- Raw sensor data collection and analysis
+- Best-effort calibration, rest, button-group, and power-intent events reports
+- Experimental EqF fusion backend
+- More community board vendors and Promicro variants
 
-本固件沿袭并致谢以下项目：
+## SDK and build environment
 
-* [SlimeVR/SlimeVR-Tracker-nRF](https://github.com/SlimeVR/SlimeVR-Tracker-nRF) —— 官方上游，SlimeVR 生态的奠基工作
-* [LyallUlric/Stacked-SmolSlime](https://github.com/LyallUlric/Stacked-SmolSlime) —— 叠层 Promicro 路线
-* [jitingcn/SlimeVR-Tracker-nRF](https://github.com/jitingcn/SlimeVR-Tracker-nRF) —— 本仓的直接基底（dev @ ad138bf，含 VQF 调参、TDMA、ESB OTA、在线磁校准、校准/静息/按键/电源事件上报等大量改进）
+`west.yml` selects [jitingcn/sdk-nrf](https://github.com/jitingcn/sdk-nrf)
+`v3.4-branch`, based on the official NCS `v3.4.0` release.
 
-本仓在其上做移植与传感器驱动补充，上游演进会持续跟进合并。
+Builds require Zephyr SDK **1.0.1 GNU** (`zephyr/gnu`, GCC 14.3.0) and
+**Python 3.12**. The firmware uses Picolibc; CI runs on Ubuntu 24.04.
 
-## 主要差异
+The firmware depends on the SDK's ESB extensions and USB fixes; stock NCS
+is not a drop-in replacement. UF2 generation uses `CONFIG_BUILD_OUTPUT_HEX=y`
+to read image addresses from HEX output. The SDK includes the
+[upstream HEX-first UF2 fix](https://github.com/zephyrproject-rtos/zephyr/pull/107944)
+required for mapped partitions.
 
-* **ICM-40608 驱动**：16 字节 FIFO、±16g/±2000dps 量程、陀螺/加计双 AAF 抗混叠 + UI 低通调优
-* **QMC5883P 磁力计驱动**（QST 车规线，上游无）：0x2C 地址、8G 档 3750 LSB/G、原生 Single 模式、Suspend 中转、饱和拒收
-* **MMC5983MA 调优**：SET/RESET 时序 500µs、100Hz 档低噪声带宽、软件饱和检测
-* **ICM-42686/42688 滤波配置**：OFF 窗口写入 UI 低通 + 陀螺 AAF，补清 INT\_ASYNC\_RESET
-* **IMUCLK（pwmclock）门控**：32.768kHz 时钟输出默认关闭，探测到 ICM-4268x/45686 自动开启（驱动自带探活回退），亦可用 `pwmclock on|off|auto` 手动控制
+## Synchronized status LEDs
 
-## SDK 与编译环境
+`CONFIG_LED_NETWORK_SYNC` is enabled by default with TDMA support. Trackers
+connected to the same receiver with a valid, fresh TDMA clock share the phase
+of ordinary status indications, on GPIO LEDs, PWM LEDs and LED strips:
 
-`west.yml` 选定 [jitingcn/sdk-nrf](https://github.com/jitingcn/sdk-nrf) `v3.4-branch`（跟随分支；基于官方 NCS v3.4.1 LTS）。
+- Normal operation: 300 ms on every 10 seconds.
+- Charging: the existing 5-second breathing waveform.
+- Low battery: 500 ms on, 500 ms off.
 
-构建需要 **Zephyr SDK 1.0.1 GNU**（`zephyr/gnu`，GCC 14.3.0）与 **Python 3.12**；固件用 Picolibc，CI 在 Ubuntu 24.04 上跑。固件依赖该 SDK fork 的 ESB 扩展与 USB 修复，官方 NCS 不能直接替换。
+Error, pairing, calibration, DFU and finite event indications keep local timing,
+nominal durations, flash counts and priority. Their deadlines include output
+time rather than adding driver latency to every step. Steady lights have no
+phase to synchronize. Brightness settings and LED-strip low-brightness dithering
+remain in effect. Changing the visible pattern resets the strip's quantization
+residual without cycling device power, so the previous animation cannot change
+the next steady color. Repeating the same request does not reset dithering.
 
-```bash
-west init -l app
-west update
-export ZEPHYR_SDK_INSTALL_DIR=/opt/zephyr-sdk-1.0.1
-west build -b nini_slimevr_uf2 -d build --sysbuild --pristine -s app -- \
-  -DBOARD_ROOT=$PWD/app
-# 产物：build/app/zephyr/zephyr.uf2 / .hex / .elf
-```
+No receiver update or protocol change is required. The existing 32-bit network
+clock wraps every 36 hours, 24 minutes and 32 seconds. A 5/10-second indication
+can have one altered interval at that boundary (the normal 10-second flash can
+have a 12-second gap); trackers use the same wrapped phase and resume their
+normal periods. The firmware does not independently extend the clock epoch on
+each tracker, so late joiners can use the same phase.
 
-## 按键手势（SW0 阶梯长按）
+Before initial synchronization, indications run locally. On loss of valid
+synchronization they continue locally using the last offset; this is not a
+guarantee of continued inter-device alignment. Fresh synchronization realigns
+them. Ordinary non-fading indications check clock changes at most 250 ms apart,
+without high-frequency LED writes; breathing retains its 5 ms rendering cadence.
 
-电源动作全部由**长按**触发：三档时间错开、LED 颜色各异、罕用档留足余量防误触，**重启是最后手段、必须按到底**。OTA 升级中全部电源手势被屏蔽。
+Entering the normal-operation indication retains at least 9.7 seconds of
+initial darkness, then joins a complete shared flash window. This can delay the
+first flash to just under 19.7 seconds. Repeated requests for the same state do
+not restart that waiting period. Set `CONFIG_LED_NETWORK_SYNC=n` for local-only
+timing.
 
-| 手势 | 时间窗 | LED | 动作 |
-|---|---|---|---|
-| 单击 | 快按快松（<1.2s） | 按下瞬亮 | 无电源动作（仅上报服务器） |
-| 2 连击 | — | 🟢 绿双闪 150/150×2 | IMU 校准（确认灯播放） |
-| 3 连击 | — | 🔵 蓝三闪 150/150×3 | 配对重置（确认灯播放）；**写 NVS 持久**——重启/刷机不复活旧配对（nRESET 序列同路径） |
-| 长按·关机区 | 1.2s 起 | 🟢 **仅绿**快闪 100/100 | 预告「松手即关机」（独占三灯，其余灯全灭） |
-| 松手 | **2s ~ 6s** | 全彩渐灭 ~1.2s | **关机（睡眠）· 常用** |
-| 松手 | 1.2s ~ 2s | 灭 | 取消（宽限窗，反悔机会） |
-| 长按·DFU 区 | 6s 起 | 🔵 **仅蓝**快闪 100/100 | 预告「松手进升级模式」（独占三灯） |
-| 松手 | **6s ~ 10s** | 全彩渐灭 ~1.2s | **进 DFU（UF2 升级模式）· 罕用** |
-| 长按·重启区 | 10s 起 | 🔴 **仅红**快闪 100/100 | 预告「按满即重启」（独占三灯） |
-| 松手 | 10s ~ 12s | 灭 | 取消（重启必须按满，防误触） |
-| 按满 | **12s** | 全彩渐灭 ~1.2s | **★ 重启（最后手段）★** |
-| OTA 升级中 | 任意 | OTA 进度反馈 | 关机 / DFU / 重启全屏蔽 |
+The LED worker owns rendering and device power transitions. Shutdown paths wait
+for its black/off operation acknowledgment instead of suspending a thread during
+a driver transfer. Gated LED strips wait 2 ms after power enable before device
+resume; strip shutdown waits 1 ms after the black-frame call returns before
+suspend/power removal. These are conservative timing margins, not confirmation
+of I2S hardware completion or successful black-frame delivery. A failed black
+write does not prevent power removal or block shutdown indefinitely.
 
-动作窗各 4s 宽、颜色只在 6s / 10s 切换——常用关机（2s 即触发）与罕用的 DFU / 重启之间留足间隔，不易误触。档位预告独占三灯（工作呼吸 / 链路心跳 / 充电琥珀此时全灭，只有目标色的灯在快闪）；松手落在动作窗即播全彩渐灭 ~1.2s 表示触发成功，动画播完才执行动作。
+## Tracker events
 
-## 错误自愈重启（防 boot-loop）
+Matching receiver firmware can expose calibration lifecycle, tracker rest,
+fusion rest, completed button groups, and power lifecycle notifications
+through its `scripts/hid_cmd.py` client. See the
+[receiver event guide](https://github.com/jitingcn/SlimeVR-Tracker-nRF-Receiver#tracker-events)
+for subscriptions and calibration watches.
 
-持续硬件错误（传感器错误、系统级错误等）会自动重启自愈，带多重防护防止「反复/不断重启」：
+The `Tracker event telemetry` Kconfig menu provides independent build-time
+switches, all enabled by default:
 
-- 只监控传感器 / 系统错误；ESB 链路瞬断属正常现象，不触发
-- 错误须**连续存在 10s** 才动作——滤掉瞬时抖动，开机初始化阶段也不会误判
-- OTA 升级中冻结监控，绝不在升级传输中重启
-- 每次自愈重启计数 +1（跨重启保持）；**累计 5 次**后停止自动重启，保持错误红灯状态等手动恢复（长按 12s 重启 / 断电）
-- **连续 60s 无错误**计数自动清零——瞬时故障自愈不累积封禁
+| Option | Reports |
+| --- | --- |
+| `CONFIG_TRACKER_EVENT_CALIBRATION` | Calibration lifecycle, progress, and results |
+| `CONFIG_TRACKER_EVENT_TRACKER_REST` | Tracker motion/rest state |
+| `CONFIG_TRACKER_EVENT_FUSION_REST` | VQF/EqF rest-detection state |
+| `CONFIG_TRACKER_EVENT_POWER` | Power intentions, boot/wake, and watchdog reset |
 
-## LED 状态机（三通道并行渲染）
+For example, set `CONFIG_TRACKER_EVENT_FUSION_REST=n` in your build configuration
+to disable only fusion-state reports, including their repeats and heartbeats.
+These switches affect telemetry only: fusion, rest detection, calibration,
+sensor lifecycle, and power-management timing remain unchanged. Button-group
+events remain enabled independently of these four switches.
 
-固件带**两套状态分配表**，console 切换（重启保持）：
+This is a bounded, best-effort channel, not a reliable action log. Rest reports
+are current observations; button groups are distinct actions. `BOOT` or `WAKE`
+is deferred for three seconds after early boot classification; `WAKE` means a
+hardware SYSTEMOFF wake, not identification of a particular wake GPIO.
+A detected hardware watchdog reset adds `WATCHDOG_RESET`; retained historical
+channel diagnostics are not treated as proof of the current failure.
 
-| 命令 | 作用 |
-|---|---|
-| `ledmode` | 查看当前模式 |
-| `ledmode debug` | 切调试表（闪烁族：节拍分明，一眼锁定） |
-| `ledmode daily` | 切回日常表（呼吸族：安静和谐，默认） |
-| `ledbright` | 查看全局亮度 |
-| `ledbright 30` | **全域最大亮度** 0-100（0=全灭，一改全改，重启保持）。数值=满刻度灯效（开机确认/全彩闪烁）的峰顶占空，**所有灯效输出都受它缩放、任何图案都不会超过它**——设 60 整体变亮到 60、设 10 整体变暗。**默认 25%**（3.3V/1kΩ 电气推算：红峰 ~0.55mA、绿/蓝 ~0.1mA，暗光/卧室不刺眼，白天可用命令调高） |
-| `ledmap` | 查看 LED 绑定：物理位 LED1/2/3 各是什么色 |
-| `ledmap LED1 R LED2 G LED3 B` | 全量指派（三位须为 R/G/B 各一次，重复直接拒绝——规避「全指向蓝」矛盾） |
-| `ledmap LED1 R` | 单点=交换语义：LED1 与当前占 R 的位对调（永不产生重复） |
-| `ledmap reset` | 回板默认 LED1=R LED2=G LED3=B（重启保持） |
+`WILL_WOM` is queued at least five seconds before physical sleep. The original idle
+deadline is retained unless the full warning interval requires a later sleep.
+Motion or another eligibility interruption withdraws the reversible request and
+emits `WOM_CANCELLED`; readiness waits do not publish a premature intention.
+The 30-second ESB/status fallback budget starts once per boot, at the first
+not-ready normal sleep attempt that reaches its original idle deadline;
+cancelling or replanning does not renew it. An early warning interrupted before
+that deadline does not change the next idle-timeout ramp anchor. The IMU ramp
+and activity-timeout delay settings have a 5000 ms Kconfig minimum to match the
+warning floor. Announcement/cancellation logs include forced mode, deadline and
+remaining lead for diagnosis.
+`WILL_SHUTDOWN` and `WILL_REBOOT` get a bounded 500 ms transmission opportunity
+before normal subsystem teardown. Power intentions are not confirmation that
+the transition completed, and radio admission and finite repetitions do not
+guarantee delivery. Emergency watchdog resets and abrupt power loss cannot wait
+for notification delivery.
 
-**LED 绑定（`ledmap`）**：板载三个物理灯位 LED1/2/3（=dts `pwm-led0/1/2`），默认依次是红/绿/蓝。本板默认引脚映射：**红=P0.10、绿=P0.09、蓝=P0.20**（pwm1 通道 2/0/1）。换用不同色序的 LED 时无需重编固件，用 `ledmap` 改「语义色→物理位」的路由即可，重启保持。共阴 LED、GPIO 经 1kΩ 限流，红色峰值电流约为绿/蓝的 4-5 倍，固件已在各灯效里做了等观感补偿；全局亮度用 `ledbright` 调。
+## License
 
-### 日常表（呼吸族·默认）
+Unless otherwise specified, all code in this repository is dual-licensed under either:
 
-整体节奏：**20s 墙钟栅格错峰**——所有起伏相位锁定、等距交替，永不追尾（绿工作 @0s → 蓝心跳 @10s → 蓝未连接双击 @10s+@13s）；段间全暗：绿→蓝 7.6s、双击内 0.6s、蓝②→下轮绿 4.6s。
+- MIT License ([LICENSE-MIT](LICENSE-MIT) or https://opensource.org/license/mit/)
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or https://opensource.org/license/apache-2-0/)
 
-| 状态 | 灯 | 表现 |
-|---|---|---|
-| 工作正常 | 🟢 绿 | 起伏 20s：1.2s 升 1.2s 降 @0s，峰与链路心跳同（50%）——两灯等权交替 |
-| 链路已连 | 🔵 蓝 | 心跳起伏 20s：@10s 与绿反相（两灯等距交替起伏，永不错峰重叠）。判据=与 receiver 通讯活跃（收到 PONG；连续 ≈3s 无通讯即退出本行） |
-| 未连接 | 🔵 蓝 | 心跳连打两次：@10s 与 @13s 各一次 1.2s 起伏（同款心跳形状，「定-定」双击感）——未配对/搜台，或已配对但接收器不在 |
-| 对频成功 | 🌈 全彩 | 闪烁 1.2s（150ms 亮/灭 ×4）——与校准完成同款 |
-| 充电中 | 🔴 红 | 低亮微呼吸（12%±2.5%）直到充满 |
-| 充满（插线） | 🟢 绿 | 5% 浅常亮；无 USB 通讯 3 分钟后全灭 |
-| 低电 <10% | 🔴 红 | 虚弱浅呼吸（6s 周期峰 8%） |
-| OTA 中 | 🔵 蓝 | 快呼吸 1.2s（纯蓝，顶掉心跳独占） |
-| 磁校准中 | 🔴→🟢 | 进度写在颜色里（红满→绿满连续插值+微呼吸） |
-| 错误 | 🔴 红（独占） | 每 5s 一次深呼吸 |
-| 按住按键 | 🟢→🔵→🔴 | 阶梯长按预告（独占三灯）：绿闪（关机区）/蓝闪（DFU 区）/红闪（重启区），见「按键手势」 |
-| 静止 ≥3 分钟 | 全灯 | 所有 LED 亮度自动减半（防佩戴者睡着后刺眼；动一下立即恢复，OTA 中豁免） |
-| 关机 | 全彩 | 渐灭 ~1.2s |
-| WOM 睡眠 | — | 全灭 |
+at your option. This means you can select the license you prefer!
 
-> 纯色语义：**红=电力域**（充电/低电）、**蓝=链路/升级域**（心跳/OTA）、**绿=生命体征/确认**。原琥珀混色已废除（与单色肉眼难辨）。
-
-> **配对记忆 ≠ 已连接**：配对信息存 NVS、跨刷机/重启保留，只决定开机后走「搜台」还是「直连旧接收器」——蓝灯只看链路是否真的活跃（通讯中=单拍，其余=双击）。已配对而接收器不在：双击持续 ≈5min → 红独占 → 再 ≈3min 自动关机。彻底解除配对 = 3 连击重置（已持久）。开机日志判别：`Pairing`=未配对、`Tracker ID: n`=已配对。
-
-### 调试表（闪烁族）
-
-| 状态 | 灯 | 表现 |
-|---|---|---|
-| 工作正常 | 🟢 绿 | 300ms blip/10s |
-| 链路已连 | 🔵 蓝 | 300ms blip/10s（与绿错相） |
-| 未连接 | 🔵 蓝 | 快闪 100/900（未配对/搜台，或已配对但接收器不在） |
-| 对频成功 | 🌈 全彩 | 闪烁族连闪（与校准完成同款） |
-| 充电中 | 🔴 红 | 20% 常亮 |
-| 充满 | 🟢 绿 | 20% 常亮 → 无通讯 3 分钟后全灭 |
-| 低电 | 🔴 红 | 双闪（150/150/150/600） |
-| OTA | 🔵 蓝 | 快闪 100/100 |
-| 磁校准 | 🔴→🟢 | 颜色即进度，500ms 硬闪 |
-| 错误 | 🔴🟢🔵 | 红→绿→蓝轮播各 500ms |
-| 长按 | 🟢→🔵→🔴 | 阶梯预告（同日常表，见「按键手势」） |
-
-Receiver 侧差异：绿=在岗（每 3s 短闪）；蓝=通讯域——配对模式 20Hz 快闪 / 待命 lub-dub 双击心跳 / 已连常亮（亮度随台数 1-10 从 50%→95% 渐亮，调试表连跳次数=台数）；每命中一台全彩渐亮渐灭 1.2s；故障红常亮。
-
-Bootloader：🔴 **红呼吸**（3s 三角，峰 25%——红 1kΩ 峰值电流 ~1.1mA 最大，压亮防刺眼）=已上电未与电脑通讯（充电器/纯供电/枚举前）；🟢 **绿呼吸**（3s 三角，峰 50%——绿 ~0.2mA 电气弱，峰须高于红）=已建立通讯（OS 认卷/数据活动）；🔵 **蓝快闪**（10Hz，50/50ms）=固件写入中；写完 🌈 **全彩闪烁 1.2s**（150ms 亮/灭 ×4）后自动进 APP。BLE OTA：已连接=绿呼吸、广播中=红呼吸。
-
-## 许可
-
-沿袭上游 Apache-2.0 / MIT 双许可，见 `LICENSE-APACHE` / `LICENSE-MIT`。
+Unless you explicitly state otherwise, any contribution intentionally submitted for
+inclusion in the work by you, as defined in the Apache-2.0 license, shall be dual
+licensed as above, without any additional terms or conditions.

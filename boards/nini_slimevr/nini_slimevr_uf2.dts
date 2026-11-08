@@ -175,6 +175,15 @@
 		 * ⚠️ 只允许写 pwr-gpios——绝不能写成 ldo-gpios（那是 nRF 稳压器档位，
 		 * sys_system_off 会把它拉高，方向正好相反）。 */
 		pwr-gpios = <&gpio1 9 (GPIO_ACTIVE_HIGH | NRF_GPIO_DRIVE_H0H1)>;
+		/* 上游 LED 所有权/令牌框架的描述符：三通道 PWM（红=pwm1 ch2、绿=ch0、蓝=ch1）。
+		 * 传输方式必须显式唯一；此处用 pwms，且条目数必须等于通道数（led_hw.c 断言）。 */
+		led-capability = "tri-discrete";
+		pwms = <&pwm1 2 PWM_MSEC(1) PWM_POLARITY_NORMAL>,
+		       <&pwm1 0 PWM_MSEC(1) PWM_POLARITY_NORMAL>,
+		       <&pwm1 1 PWM_MSEC(1) PWM_POLARITY_NORMAL>;
+		led-channel-colors = <1 2 3>; /* 红、绿、蓝 */
+		led-channel-weights = <10000 10000 10000>;
+		led-primary-channel = <1>; /* 绿色为主通道 */
 		led0-gpios = <&gpio0 10 GPIO_ACTIVE_HIGH>;
 		led1-gpios = <&gpio0 9 GPIO_ACTIVE_HIGH>;
 		led2-gpios = <&gpio0 20 GPIO_ACTIVE_HIGH>;

@@ -211,6 +211,10 @@ static int divider_setup(void) {
 #endif
 
 static bool battery_ok;
+#if USE_PMIC_CHARGER
+static int64_t charger_sample_ms;
+static bool charger_sample_valid;
+#endif
 
 static int battery_setup() {
 #if USE_PMIC_CHARGER
@@ -253,6 +257,7 @@ int battery_measure_enable(bool enable) {
 
 int battery_sample(void) {
 #if USE_PMIC_CHARGER
+	charger_sample_valid = false;
 	if (!battery_ok) {
 		return -ENODEV;
 	}
@@ -264,6 +269,10 @@ int battery_sample(void) {
 
 	struct sensor_value voltage;
 	rc = sensor_channel_get(charger, SENSOR_CHAN_GAUGE_VOLTAGE, &voltage);
+	if (rc == 0) {
+		charger_sample_ms = k_uptime_get();
+		charger_sample_valid = true;
+	}
 	return rc == 0 ? sensor_value_to_milli(&voltage) : rc;
 #else
 	int rc = -ENOENT;
@@ -332,6 +341,27 @@ int battery_charger_state(bool *plugged, bool *charging, bool *charged)
 #endif
 }
 
+int battery_charger_snapshot(bool *plugged, bool *charging, bool *charged)
+{
+#if USE_PMIC_CHARGER
+	/* The power owner fetches each 100 ms iteration. Preserve the 1500 ms
+	 * freshness allowance, but reject stopped or incompletely read samples. */
+	if (!charger_sample_valid || k_uptime_get() - charger_sample_ms > 1500) return -EAGAIN;
+	bool external, active, full;
+	int err = battery_charger_state(&external, &active, &full);
+	if (err) return err;
+	*plugged = external;
+	*charging = active;
+	*charged = full && !active;
+	return 0;
+#else
+	ARG_UNUSED(plugged);
+	ARG_UNUSED(charging);
+	ARG_UNUSED(charged);
+	return -ENOTSUP;
+#endif
+}
+
 unsigned int
 battery_level_pptt(unsigned int batt_mV, const struct battery_level_point* curve) {
 	const struct battery_level_point* pb = curve;
@@ -371,15 +401,13 @@ static const struct battery_level_point levels[] = {
 	{500, 3400},
 	{0, 3200},
 #else
+#if !CONFIG_BATTERY_NO_MAPPING
 #warning "Battery voltage map not defined"
+#endif
 	{10000, 0},
 	{0, 0},
 #endif
 };
-
-int read_batt() {
-	return read_batt_mV(NULL);
-}
 
 int read_batt_mV(int* out) {
 	int rc = battery_measure_enable(true);
